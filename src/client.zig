@@ -150,7 +150,7 @@ pub const Client = struct {
             }
         }
 
-        try client.stream.writeAll("CONNECT {}\r\n");
+        try client.writeLine(&[_][]const u8{"CONNECT {}"});
         return client;
     }
 
@@ -171,19 +171,11 @@ pub const Client = struct {
     pub fn publish(self: *Client, subject: []const u8, reply: ?[]const u8, payload: []const u8) !void {
         var size_buf: [32]u8 = undefined;
         if (reply) |reply_to| {
-            try self.stream.writeAll("PUB ");
-            try self.stream.writeAll(subject);
-            try self.stream.writeAll(" ");
-            try self.stream.writeAll(reply_to);
-            try self.stream.writeAll(" ");
             const size_text = try std.fmt.bufPrint(&size_buf, "{d}\r\n", .{payload.len});
-            try self.stream.writeAll(size_text);
+            try self.writeParts(&[_][]const u8{ "PUB ", subject, " ", reply_to, " ", size_text });
         } else {
-            try self.stream.writeAll("PUB ");
-            try self.stream.writeAll(subject);
-            try self.stream.writeAll(" ");
             const size_text = try std.fmt.bufPrint(&size_buf, "{d}\r\n", .{payload.len});
-            try self.stream.writeAll(size_text);
+            try self.writeParts(&[_][]const u8{ "PUB ", subject, " ", size_text });
         }
         try self.stream.writeAll(payload);
         try self.stream.writeAll("\r\n");
@@ -191,33 +183,29 @@ pub const Client = struct {
 
     pub fn subscribe(self: *Client, subject: []const u8, queue: ?[]const u8, sid: u64) !void {
         var sid_buf: [32]u8 = undefined;
-        try self.stream.writeAll("SUB ");
-        try self.stream.writeAll(subject);
         if (queue) |group| {
-            try self.stream.writeAll(" ");
-            try self.stream.writeAll(group);
+            const sid_text = try std.fmt.bufPrint(&sid_buf, "{d}\r\n", .{sid});
+            try self.writeParts(&[_][]const u8{ "SUB ", subject, " ", group, " ", sid_text });
+            return;
         }
-        try self.stream.writeAll(" ");
         const sid_text = try std.fmt.bufPrint(&sid_buf, "{d}\r\n", .{sid});
-        try self.stream.writeAll(sid_text);
+        try self.writeParts(&[_][]const u8{ "SUB ", subject, " ", sid_text });
     }
 
     pub fn unsubscribe(self: *Client, sid: u64, max: ?u64) !void {
         var sid_buf: [32]u8 = undefined;
         var max_buf: [32]u8 = undefined;
-        try self.stream.writeAll("UNSUB ");
         const sid_text = try std.fmt.bufPrint(&sid_buf, "{d}", .{sid});
-        try self.stream.writeAll(sid_text);
         if (max) |limit| {
-            try self.stream.writeAll(" ");
             const max_text = try std.fmt.bufPrint(&max_buf, "{d}", .{limit});
-            try self.stream.writeAll(max_text);
+            try self.writeLine(&[_][]const u8{ "UNSUB ", sid_text, " ", max_text });
+        } else {
+            try self.writeLine(&[_][]const u8{ "UNSUB ", sid_text });
         }
-        try self.stream.writeAll("\r\n");
     }
 
     pub fn ping(self: *Client) !void {
-        try self.stream.writeAll("PING\r\n");
+        try self.writeLine(&[_][]const u8{"PING"});
         while (true) {
             const frame = try self.nextFrame() orelse return error.UnexpectedEndOfStream;
             switch (frame) {
@@ -244,6 +232,17 @@ pub const Client = struct {
             const msg = try self.nextMessage() orelse return error.UnexpectedEndOfStream;
             if (std.mem.eql(u8, msg.subject, subject)) return msg;
         }
+    }
+
+    fn writeParts(self: *Client, parts: []const []const u8) !void {
+        for (parts) |part| {
+            try self.stream.writeAll(part);
+        }
+    }
+
+    fn writeLine(self: *Client, parts: []const []const u8) !void {
+        try self.writeParts(parts);
+        try self.stream.writeAll("\r\n");
     }
 };
 

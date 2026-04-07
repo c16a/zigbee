@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 const std = @import("std");
 
+pub const default_client_server = "127.0.0.1:4222";
+
 pub const Subscription = struct {
     subject: []const u8,
     queue: ?[]const u8,
@@ -18,13 +20,131 @@ pub const Publish = struct {
     payload: []const u8,
 };
 
-pub const Command = union(enum) {
+pub const Info = struct {
+    server_id: []const u8 = "zigbee",
+    version: []const u8 = "0.1.0",
+    proto: u8 = 1,
+    host: []const u8 = "127.0.0.1",
+    port: u16,
+    max_payload: u32 = 1048576,
+};
+
+pub fn formatInfoJson(allocator: std.mem.Allocator, info: Info) ![]u8 {
+    return try std.json.Stringify.valueAlloc(allocator, info, .{});
+}
+
+pub const OutgoingMessage = struct {
+    session_id: u64,
+    sid: u64,
+    subject: []const u8,
+    reply: ?[]const u8,
+    payload: []const u8,
+};
+
+pub const OutgoingFrame = union(enum) {
+    info: Info,
+    pong,
+    msg: OutgoingMessage,
+};
+
+pub const ServerCommand = union(enum) {
     ping,
     pong,
     connect: []const u8,
     sub: Subscription,
     unsub: Unsubscribe,
     publish: Publish,
+};
+
+pub const Command = ServerCommand;
+
+pub const ClientVerb = enum {
+    publish,
+    subscribe,
+    unsubscribe,
+    request,
+    reply,
+    ping,
+};
+
+pub const client_verbs = [_]ClientVerb{
+    .publish,
+    .subscribe,
+    .unsubscribe,
+    .request,
+    .reply,
+    .ping,
+};
+
+pub fn parseClientVerb(text: []const u8) ?ClientVerb {
+    if (std.mem.eql(u8, text, "pub")) return .publish;
+    if (std.mem.eql(u8, text, "sub")) return .subscribe;
+    if (std.mem.eql(u8, text, "unsub")) return .unsubscribe;
+    if (std.mem.eql(u8, text, "request")) return .request;
+    if (std.mem.eql(u8, text, "reply")) return .reply;
+    if (std.mem.eql(u8, text, "ping")) return .ping;
+    return null;
+}
+
+pub fn clientVerbName(verb: ClientVerb) []const u8 {
+    return switch (verb) {
+        .publish => "pub",
+        .subscribe => "sub",
+        .unsubscribe => "unsub",
+        .request => "request",
+        .reply => "reply",
+        .ping => "ping",
+    };
+}
+
+pub const ClientPublish = struct {
+    server: []const u8 = default_client_server,
+    subject: []const u8,
+    payload: []const u8,
+    reply: ?[]const u8 = null,
+};
+
+pub const ClientSubscribe = struct {
+    server: []const u8 = default_client_server,
+    subject: []const u8,
+    queue: ?[]const u8 = null,
+    sid: u64 = 1,
+    count: ?u64 = null,
+};
+
+pub const ClientUnsubscribe = struct {
+    server: []const u8 = default_client_server,
+    sid: u64,
+    max: ?u64 = null,
+};
+
+pub const ClientRequest = struct {
+    server: []const u8 = default_client_server,
+    subject: []const u8,
+    payload: []const u8,
+};
+
+pub const ClientReply = struct {
+    server: []const u8 = default_client_server,
+    subject: []const u8,
+    payload: []const u8,
+    queue: ?[]const u8 = null,
+    sid: u64 = 1,
+    count: ?u64 = null,
+};
+
+pub const ClientPing = struct {
+    server: []const u8 = default_client_server,
+    count: u64 = 1,
+};
+
+pub const ClientCommand = union(enum) {
+    publish: ClientPublish,
+    subscribe: ClientSubscribe,
+    unsubscribe: ClientUnsubscribe,
+    request: ClientRequest,
+    reply: ClientReply,
+    ping: ClientPing,
 };
 
 const PendingPublish = struct {

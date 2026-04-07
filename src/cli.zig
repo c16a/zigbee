@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: MIT
 const std = @import("std");
 const client_mod = @import("client.zig");
-
-const default_server = "127.0.0.1:4222";
+const protocol_mod = @import("protocol.zig");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}).init;
     defer _ = gpa.deinit();
 
     var thread_safe = std.heap.ThreadSafeAllocator{
@@ -16,63 +15,23 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    const command = try parseCommand(allocator, args);
+    const command = parseCommand(allocator, args) catch |err| switch (err) {
+        error.HelpRequested => return,
+        error.MissingCommand, error.UnknownCommand => {
+            printUsage();
+            return err;
+        },
+        else => return err,
+    };
     try runCommand(allocator, command);
 }
 
 const Command = union(enum) {
-    publish: PublishCommand,
-    subscribe: SubscribeCommand,
-    unsubscribe: UnsubscribeCommand,
-    request: RequestCommand,
-    reply: ReplyCommand,
-    ping: PingCommand,
+    client: protocol_mod.ClientCommand,
     bench: BenchCommand,
 };
-
-const PublishCommand = struct {
-    server: []const u8 = default_server,
-    subject: []const u8,
-    payload: []const u8,
-    reply: ?[]const u8 = null,
-};
-
-const SubscribeCommand = struct {
-    server: []const u8 = default_server,
-    subject: []const u8,
-    queue: ?[]const u8 = null,
-    sid: u64 = 1,
-    count: ?u64 = null,
-};
-
-const UnsubscribeCommand = struct {
-    server: []const u8 = default_server,
-    sid: u64,
-    max: ?u64 = null,
-};
-
-const RequestCommand = struct {
-    server: []const u8 = default_server,
-    subject: []const u8,
-    payload: []const u8,
-};
-
-const ReplyCommand = struct {
-    server: []const u8 = default_server,
-    subject: []const u8,
-    payload: []const u8,
-    queue: ?[]const u8 = null,
-    sid: u64 = 1,
-    count: ?u64 = null,
-};
-
-const PingCommand = struct {
-    server: []const u8 = default_server,
-    count: u64 = 1,
-};
-
 const BenchCommon = struct {
-    server: []const u8 = default_server,
+    server: []const u8 = protocol_mod.default_client_server,
     clients: usize = 1,
     msgs: u64 = 1000,
     size: usize = 128,
@@ -116,9 +75,10 @@ const BenchCommand = union(enum) {
     latency: BenchLatency,
 };
 
-const ParsedCommand = Command;
+fn parseCommand(allocator: std.mem.Allocator, args: []const []const u8) !Command {
+    if (args.len <= 1) return error.HelpRequested;
+    if (isHelpArg(args[1])) return error.HelpRequested;
 
-fn parseCommand(allocator: std.mem.Allocator, args: []const []const u8) !ParsedCommand {
     var cursor = ArgCursor.init(args[1..]);
     var global_server: ?[]const u8 = null;
 
@@ -130,23 +90,19 @@ fn parseCommand(allocator: std.mem.Allocator, args: []const []const u8) !ParsedC
 
     const verb = cursor.next() orelse return error.MissingCommand;
 
-    var command: ParsedCommand = undefined;
-    if (std.mem.eql(u8, verb, "pub")) {
-        command = .{ .publish = try parsePublish(allocator, &cursor) };
-    } else if (std.mem.eql(u8, verb, "sub")) {
-        command = .{ .subscribe = try parseSubscribe(allocator, &cursor) };
-    } else if (std.mem.eql(u8, verb, "unsub")) {
-        command = .{ .unsubscribe = try parseUnsubscribe(&cursor) };
-    } else if (std.mem.eql(u8, verb, "request")) {
-        command = .{ .request = try parseRequest(allocator, &cursor) };
-    } else if (std.mem.eql(u8, verb, "reply")) {
-        command = .{ .reply = try parseReply(allocator, &cursor) };
-    } else if (std.mem.eql(u8, verb, "ping")) {
-        command = .{ .ping = try parsePing(&cursor) };
-    } else if (std.mem.eql(u8, verb, "bench")) {
+    var command: Command = undefined;
+    if (std.mem.eql(u8, verb, "bench")) {
         command = .{ .bench = try parseBench(allocator, &cursor) };
     } else {
-        return error.UnknownCommand;
+        const protocol_verb = protocol_mod.parseClientVerb(verb) orelse return error.UnknownCommand;
+        command = .{ .client = switch (protocol_verb) {
+            .publish => .{ .publish = try parsePublish(allocator, &cursor) },
+            .subscribe => .{ .subscribe = try parseSubscribe(allocator, &cursor) },
+            .unsubscribe => .{ .unsubscribe = try parseUnsubscribe(&cursor) },
+            .request => .{ .request = try parseRequest(allocator, &cursor) },
+            .reply => .{ .reply = try parseReply(allocator, &cursor) },
+            .ping => .{ .ping = try parsePing(&cursor) },
+        } };
     }
 
     if (global_server) |server| {
@@ -155,16 +111,29 @@ fn parseCommand(allocator: std.mem.Allocator, args: []const []const u8) !ParsedC
     return command;
 }
 
-fn applyGlobalServer(command: ParsedCommand, server: []const u8) ParsedCommand {
+fn applyGlobalServer(command: Command, server: []const u8) Command {
     return switch (command) {
-        .publish => |cmd| .{ .publish = .{ .server = if (std.mem.eql(u8, cmd.server, default_server)) server else cmd.server, .subject = cmd.subject, .payload = cmd.payload, .reply = cmd.reply } },
-        .subscribe => |cmd| .{ .subscribe = .{ .server = if (std.mem.eql(u8, cmd.server, default_server)) server else cmd.server, .subject = cmd.subject, .queue = cmd.queue, .sid = cmd.sid, .count = cmd.count } },
-        .unsubscribe => |cmd| .{ .unsubscribe = .{ .server = if (std.mem.eql(u8, cmd.server, default_server)) server else cmd.server, .sid = cmd.sid, .max = cmd.max } },
-        .request => |cmd| .{ .request = .{ .server = if (std.mem.eql(u8, cmd.server, default_server)) server else cmd.server, .subject = cmd.subject, .payload = cmd.payload } },
-        .reply => |cmd| .{ .reply = .{ .server = if (std.mem.eql(u8, cmd.server, default_server)) server else cmd.server, .subject = cmd.subject, .payload = cmd.payload, .queue = cmd.queue, .sid = cmd.sid, .count = cmd.count } },
-        .ping => |cmd| .{ .ping = .{ .server = if (std.mem.eql(u8, cmd.server, default_server)) server else cmd.server, .count = cmd.count } },
+        .client => |cmd| .{ .client = applyClientServer(cmd, server) },
         .bench => |cmd| .{ .bench = applyGlobalServerBench(cmd, server) },
     };
+}
+
+fn applyClientServer(cmd: protocol_mod.ClientCommand, server: []const u8) protocol_mod.ClientCommand {
+    return switch (cmd) {
+        .publish => |payload| .{ .publish = applyServerIfDefault(payload, server) },
+        .subscribe => |payload| .{ .subscribe = applyServerIfDefault(payload, server) },
+        .unsubscribe => |payload| .{ .unsubscribe = applyServerIfDefault(payload, server) },
+        .request => |payload| .{ .request = applyServerIfDefault(payload, server) },
+        .reply => |payload| .{ .reply = applyServerIfDefault(payload, server) },
+        .ping => |payload| .{ .ping = applyServerIfDefault(payload, server) },
+    };
+}
+
+fn applyServerIfDefault(value: anytype, server: []const u8) @TypeOf(value) {
+    if (!std.mem.eql(u8, value.server, protocol_mod.default_client_server)) return value;
+    var updated = value;
+    updated.server = server;
+    return updated;
 }
 
 fn applyGlobalServerBench(cmd: BenchCommand, server: []const u8) BenchCommand {
@@ -178,7 +147,7 @@ fn applyGlobalServerBench(cmd: BenchCommand, server: []const u8) BenchCommand {
 }
 
 fn applyGlobalServerCommon(common: BenchCommon, server: []const u8) BenchCommon {
-    if (std.mem.eql(u8, common.server, default_server)) {
+    if (std.mem.eql(u8, common.server, protocol_mod.default_client_server)) {
         var updated = common;
         updated.server = server;
         return updated;
@@ -186,16 +155,31 @@ fn applyGlobalServerCommon(common: BenchCommon, server: []const u8) BenchCommon 
     return common;
 }
 
-fn runCommand(allocator: std.mem.Allocator, command: ParsedCommand) !void {
+fn runCommand(allocator: std.mem.Allocator, command: Command) !void {
     switch (command) {
-        .publish => |cmd| try runPublish(allocator, cmd),
-        .subscribe => |cmd| try runSubscribe(allocator, cmd),
-        .unsubscribe => |cmd| try runUnsubscribe(allocator, cmd),
-        .request => |cmd| try runRequest(allocator, cmd),
-        .reply => |cmd| try runReply(allocator, cmd),
-        .ping => |cmd| try runPing(allocator, cmd),
+        .client => |cmd| switch (cmd) {
+            .publish => |payload| try runPublish(allocator, payload),
+            .subscribe => |payload| try runSubscribe(allocator, payload),
+            .unsubscribe => |payload| try runUnsubscribe(allocator, payload),
+            .request => |payload| try runRequest(allocator, payload),
+            .reply => |payload| try runReply(allocator, payload),
+            .ping => |payload| try runPing(allocator, payload),
+        },
         .bench => |cmd| try runBench(allocator, cmd),
     }
+}
+
+fn isHelpArg(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "help");
+}
+
+fn printUsage() void {
+    std.debug.print("Usage: zigbee-cli [--server IP:port] <command> ...\n", .{});
+    std.debug.print("\nCommands:\n", .{});
+    for (protocol_mod.client_verbs) |verb| {
+        std.debug.print("  {s}\n", .{protocol_mod.clientVerbName(verb)});
+    }
+    std.debug.print("  bench <pub|sub|request|reply|latency> ...\n", .{});
 }
 
 const ArgCursor = struct {
@@ -219,8 +203,8 @@ const ArgCursor = struct {
     }
 };
 
-fn parsePublish(allocator: std.mem.Allocator, cursor: *ArgCursor) !PublishCommand {
-    var cmd = PublishCommand{ .subject = undefined, .payload = undefined };
+fn parsePublish(allocator: std.mem.Allocator, cursor: *ArgCursor) !protocol_mod.ClientPublish {
+    var cmd = protocol_mod.ClientPublish{ .subject = undefined, .payload = undefined };
     var positionals: std.ArrayList([]const u8) = .empty;
     defer positionals.deinit(allocator);
 
@@ -243,8 +227,8 @@ fn parsePublish(allocator: std.mem.Allocator, cursor: *ArgCursor) !PublishComman
     return cmd;
 }
 
-fn parseSubscribe(allocator: std.mem.Allocator, cursor: *ArgCursor) !SubscribeCommand {
-    var cmd = SubscribeCommand{ .subject = undefined };
+fn parseSubscribe(allocator: std.mem.Allocator, cursor: *ArgCursor) !protocol_mod.ClientSubscribe {
+    var cmd = protocol_mod.ClientSubscribe{ .subject = undefined };
     var positionals: std.ArrayList([]const u8) = .empty;
     defer positionals.deinit(allocator);
 
@@ -273,8 +257,8 @@ fn parseSubscribe(allocator: std.mem.Allocator, cursor: *ArgCursor) !SubscribeCo
     return cmd;
 }
 
-fn parseUnsubscribe(cursor: *ArgCursor) !UnsubscribeCommand {
-    var cmd = UnsubscribeCommand{ .sid = 0 };
+fn parseUnsubscribe(cursor: *ArgCursor) !protocol_mod.ClientUnsubscribe {
+    var cmd = protocol_mod.ClientUnsubscribe{ .sid = 0 };
     while (cursor.next()) |arg| {
         if (std.mem.eql(u8, arg, "--server")) {
             cmd.server = try takeValue(cursor, "--server");
@@ -298,8 +282,8 @@ fn parseUnsubscribe(cursor: *ArgCursor) !UnsubscribeCommand {
     return cmd;
 }
 
-fn parseRequest(allocator: std.mem.Allocator, cursor: *ArgCursor) !RequestCommand {
-    var cmd = RequestCommand{ .subject = undefined, .payload = undefined };
+fn parseRequest(allocator: std.mem.Allocator, cursor: *ArgCursor) !protocol_mod.ClientRequest {
+    var cmd = protocol_mod.ClientRequest{ .subject = undefined, .payload = undefined };
     var positionals: std.ArrayList([]const u8) = .empty;
     defer positionals.deinit(allocator);
 
@@ -317,8 +301,8 @@ fn parseRequest(allocator: std.mem.Allocator, cursor: *ArgCursor) !RequestComman
     return cmd;
 }
 
-fn parseReply(allocator: std.mem.Allocator, cursor: *ArgCursor) !ReplyCommand {
-    var cmd = ReplyCommand{ .subject = undefined, .payload = undefined };
+fn parseReply(allocator: std.mem.Allocator, cursor: *ArgCursor) !protocol_mod.ClientReply {
+    var cmd = protocol_mod.ClientReply{ .subject = undefined, .payload = undefined };
     var positionals: std.ArrayList([]const u8) = .empty;
     defer positionals.deinit(allocator);
 
@@ -348,8 +332,8 @@ fn parseReply(allocator: std.mem.Allocator, cursor: *ArgCursor) !ReplyCommand {
     return cmd;
 }
 
-fn parsePing(cursor: *ArgCursor) !PingCommand {
-    var cmd = PingCommand{};
+fn parsePing(cursor: *ArgCursor) !protocol_mod.ClientPing {
+    var cmd = protocol_mod.ClientPing{};
     while (cursor.next()) |arg| {
         if (std.mem.eql(u8, arg, "--server")) {
             cmd.server = try takeValue(cursor, "--server");
@@ -494,14 +478,14 @@ fn parseDuration(text: []const u8) !u64 {
     return (try parseU64(text)) * std.time.ns_per_ms;
 }
 
-fn runPublish(allocator: std.mem.Allocator, cmd: PublishCommand) !void {
+fn runPublish(allocator: std.mem.Allocator, cmd: protocol_mod.ClientPublish) !void {
     var client = try connectClient(allocator, cmd.server);
     defer client.deinit();
     try client.publish(cmd.subject, cmd.reply, cmd.payload);
     std.debug.print("published {d} bytes to \"{s}\"\n", .{ cmd.payload.len, cmd.subject });
 }
 
-fn runSubscribe(allocator: std.mem.Allocator, cmd: SubscribeCommand) !void {
+fn runSubscribe(allocator: std.mem.Allocator, cmd: protocol_mod.ClientSubscribe) !void {
     var client = try connectClient(allocator, cmd.server);
     defer client.deinit();
     try client.subscribe(cmd.subject, cmd.queue, cmd.sid);
@@ -521,14 +505,14 @@ fn runSubscribe(allocator: std.mem.Allocator, cmd: SubscribeCommand) !void {
     }
 }
 
-fn runUnsubscribe(allocator: std.mem.Allocator, cmd: UnsubscribeCommand) !void {
+fn runUnsubscribe(allocator: std.mem.Allocator, cmd: protocol_mod.ClientUnsubscribe) !void {
     var client = try connectClient(allocator, cmd.server);
     defer client.deinit();
     try client.unsubscribe(cmd.sid, cmd.max);
     std.debug.print("sent UNSUB for sid {d}\n", .{cmd.sid});
 }
 
-fn runRequest(allocator: std.mem.Allocator, cmd: RequestCommand) !void {
+fn runRequest(allocator: std.mem.Allocator, cmd: protocol_mod.ClientRequest) !void {
     var client = try connectClient(allocator, cmd.server);
     defer client.deinit();
     const inbox = try client_mod.makeInbox(allocator, "request");
@@ -539,7 +523,7 @@ fn runRequest(allocator: std.mem.Allocator, cmd: RequestCommand) !void {
     std.debug.print("{s}\n", .{msg.payload});
 }
 
-fn runReply(allocator: std.mem.Allocator, cmd: ReplyCommand) !void {
+fn runReply(allocator: std.mem.Allocator, cmd: protocol_mod.ClientReply) !void {
     var client = try connectClient(allocator, cmd.server);
     defer client.deinit();
     try client.subscribe(cmd.subject, cmd.queue, cmd.sid);
@@ -560,7 +544,7 @@ fn runReply(allocator: std.mem.Allocator, cmd: ReplyCommand) !void {
     }
 }
 
-fn runPing(allocator: std.mem.Allocator, cmd: PingCommand) !void {
+fn runPing(allocator: std.mem.Allocator, cmd: protocol_mod.ClientPing) !void {
     var client = try connectClient(allocator, cmd.server);
     defer client.deinit();
     var i: u64 = 0;
@@ -1006,18 +990,20 @@ fn fatal(err: anyerror) noreturn {
 test "parse publish command" {
     const argv = [_][]const u8{ "zigbee-cli", "pub", "--server", "127.0.0.1:4222", "foo", "hello", "world" };
     const cmd = try parseCommand(std.testing.allocator, argv[0..]);
-    defer std.testing.allocator.free(cmd.publish.payload);
-    try std.testing.expect(cmd == .publish);
-    try std.testing.expectEqualStrings("foo", cmd.publish.subject);
-    try std.testing.expectEqualStrings("hello world", cmd.publish.payload);
-    try std.testing.expectEqualStrings("127.0.0.1:4222", cmd.publish.server);
+    defer std.testing.allocator.free(cmd.client.publish.payload);
+    try std.testing.expect(cmd == .client);
+    try std.testing.expect(cmd.client == .publish);
+    try std.testing.expectEqualStrings("foo", cmd.client.publish.subject);
+    try std.testing.expectEqualStrings("hello world", cmd.client.publish.payload);
+    try std.testing.expectEqualStrings("127.0.0.1:4222", cmd.client.publish.server);
 }
 
 test "parse global server ping command" {
     const argv = [_][]const u8{ "zigbee-cli", "--server", "127.0.0.1:4222", "ping" };
     const cmd = try parseCommand(std.testing.allocator, argv[0..]);
-    try std.testing.expect(cmd == .ping);
-    try std.testing.expectEqualStrings("127.0.0.1:4222", cmd.ping.server);
+    try std.testing.expect(cmd == .client);
+    try std.testing.expect(cmd.client == .ping);
+    try std.testing.expectEqualStrings("127.0.0.1:4222", cmd.client.ping.server);
 }
 
 test "parse bench request command" {

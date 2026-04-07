@@ -28,10 +28,18 @@ This installs both binaries into `zig-out/bin/`.
 Run the broker with:
 
 ```sh
-zig build run -- --port 4222
+zig build run -- --config zigbee.config.json
 ```
 
-The server listens on `0.0.0.0:4222` by default.
+If `zigbee.config.json` is absent, the server listens on `0.0.0.0:4222`.
+
+Example configuration:
+
+```json
+{
+  "listen_address": "0.0.0.0:4222"
+}
+```
 
 ## CLI
 
