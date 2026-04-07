@@ -57,7 +57,7 @@ You can place `--server` before the command name as a global flag.
 - `unsub` sends an unsubscribe control frame for a subscription id.
 - `request` publishes a message with a temporary reply inbox and waits for one reply.
 - `reply` subscribes to a subject and replies to each incoming request with the provided payload.
-- `ping` sends PING/PONG round trips and prints their latency.
+- `ping` sends PING/PONG round trips.
 
 ## Benchmarking
 
@@ -91,7 +91,7 @@ Benchmarking lives under `zigbee-cli bench`.
 - `bench sub` receives messages and measures subscription throughput.
 - `bench request` sends request/reply traffic and waits for responses.
 - `bench reply` runs a queue-backed responder that answers requests.
-- `bench latency` measures PING/PONG round-trip latency.
+- `bench latency` runs PING/PONG round trips.
 
 ## Examples
 

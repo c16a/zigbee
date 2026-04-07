@@ -565,10 +565,8 @@ fn runPing(allocator: std.mem.Allocator, cmd: PingCommand) !void {
     defer client.deinit();
     var i: u64 = 0;
     while (i < cmd.count) : (i += 1) {
-        const start = std.time.nanoTimestamp();
         try client.ping();
-        const elapsed = std.time.nanoTimestamp() - start;
-        std.debug.print("PONG {d} ns\n", .{elapsed});
+        std.debug.print("PONG\n", .{});
     }
 }
 
@@ -922,7 +920,6 @@ fn runBenchLatency(allocator: std.mem.Allocator, bench: BenchLatency) !void {
             .messages = splitCount(bench.common.msgs, index, client_count),
             .sleep_ns = bench.common.sleep_ns,
             .gate = &gate,
-            .total_ns = 0,
             .messages_done = 0,
         };
         threads[index] = try std.Thread.spawn(.{}, benchLatencyWorker, .{&contexts[index]});
@@ -933,18 +930,12 @@ fn runBenchLatency(allocator: std.mem.Allocator, bench: BenchLatency) !void {
     gate.go.store(true, .release);
 
     var totals = BenchTotals{};
-    var total_ns: u128 = 0;
     for (threads) |thread| thread.join();
     for (contexts) |ctx| {
         totals.messages += ctx.messages_done;
-        total_ns += ctx.total_ns;
     }
     const elapsed = std.time.nanoTimestamp() - start;
     printBenchTotals("latency", totals, elapsed);
-    if (totals.messages > 0) {
-        const avg = @as(f64, @floatFromInt(total_ns)) / @as(f64, @floatFromInt(totals.messages));
-        std.debug.print("average ping RTT: {d:.3} us\n", .{avg / 1000.0});
-    }
 }
 
 const LatencyWorker = struct {
@@ -953,7 +944,6 @@ const LatencyWorker = struct {
     messages: u64,
     sleep_ns: u64,
     gate: *StartGate,
-    total_ns: u128,
     messages_done: u64,
 };
 
@@ -964,15 +954,11 @@ fn benchLatencyWorker(ctx: *LatencyWorker) void {
     waitForGo(ctx.gate);
 
     var seen: u64 = 0;
-    var total_ns: u128 = 0;
     while (seen < ctx.messages) : (seen += 1) {
-        const start = std.time.nanoTimestamp();
         tryOrFatal(client.ping());
-        total_ns += @as(u128, @intCast(std.time.nanoTimestamp() - start));
         if (ctx.sleep_ns > 0) std.Thread.sleep(ctx.sleep_ns);
     }
     ctx.messages_done = seen;
-    ctx.total_ns = total_ns;
 }
 
 fn waitForGate(gate: *StartGate, clients: u32) void {
@@ -1001,12 +987,10 @@ fn printBenchTotals(label: []const u8, totals: BenchTotals, elapsed_ns: i128) vo
     const seconds = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0;
     const msg_rate = if (seconds > 0) @as(f64, @floatFromInt(totals.messages)) / seconds else 0;
     const byte_rate = if (seconds > 0) @as(f64, @floatFromInt(totals.bytes)) / seconds else 0;
-    const avg_us = if (totals.messages > 0) @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(totals.messages)) / 1000.0 else 0;
-    std.debug.print("{s} stats: {d:.3} msgs/sec ~ {d:.3} MiB/sec ~ {d:.3} us/msg\n", .{
+    std.debug.print("{s} stats: {d:.3} msgs/sec ~ {d:.3} MiB/sec\n", .{
         label,
         msg_rate,
         byte_rate / 1024.0 / 1024.0,
-        avg_us,
     });
 }
 
