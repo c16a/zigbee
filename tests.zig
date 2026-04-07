@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 const std = @import("std");
+const config_mod = @import("config.zig");
 const client_mod = @import("client.zig");
 const broker_mod = @import("broker.zig");
 const protocol = @import("protocol.zig");
@@ -40,6 +41,21 @@ test "broker queue groups and unsubscribe" {
     const second = try broker.publish("foo");
     defer std.testing.allocator.free(second);
     try std.testing.expectEqual(@as(usize, 1), second.len);
+}
+
+test "config file loads listen address" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "zigbee.config.json",
+        .data = "{\"listen_address\":\"127.0.0.1:4222\"}",
+    });
+
+    var loaded = try config_mod.loadFromDir(tmp.dir, std.testing.allocator, "zigbee.config.json", true);
+    try std.testing.expect(loaded != null);
+    defer loaded.?.deinit();
+    try std.testing.expectEqualStrings("127.0.0.1:4222", loaded.?.value().listen_address.?);
 }
 
 fn makeSocketPair() ![2]std.net.Stream {
