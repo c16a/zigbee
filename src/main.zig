@@ -5,7 +5,7 @@ const broker_mod = @import("broker.zig");
 const server_mod = @import("server.zig");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}).init;
     defer _ = gpa.deinit();
 
     var thread_safe = std.heap.ThreadSafeAllocator{
@@ -48,12 +48,11 @@ fn parseConfigPath(args: [][:0]u8) ![]const u8 {
 }
 
 fn resolveListenAddress(config: ?config_mod.LoadedConfig) !std.net.Address {
-    const address = if (config) |loaded| blk: {
+    var address = try std.net.Address.parseIp("0.0.0.0", 4222);
+    if (config) |loaded| {
         if (loaded.value().listen_address) |listen_address| {
-            break :blk try std.net.Address.parseIpAndPort(listen_address);
+            address = try std.net.Address.parseIpAndPort(listen_address);
         }
-        break :blk try std.net.Address.parseIp("0.0.0.0", 4222);
-    } else try std.net.Address.parseIp("0.0.0.0", 4222);
-
+    }
     return address;
 }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 const std = @import("std");
 const broker_mod = @import("broker.zig");
+const session = @import("session.zig");
 const protocol = @import("protocol.zig");
 
 pub const Server = struct {
@@ -8,8 +9,8 @@ pub const Server = struct {
     broker: *broker_mod.Broker,
     listener: std.net.Server,
     sessions_mutex: std.Thread.Mutex = .{},
-    sessions: std.AutoHashMap(u64, *broker_mod.Session),
-    all_sessions: std.ArrayList(*broker_mod.Session) = .empty,
+    sessions: std.AutoHashMap(u64, *session.Session),
+    all_sessions: std.ArrayList(*session.Session) = .empty,
     client_threads: std.ArrayList(std.Thread) = .empty,
     next_session_id: u64 = 1,
 
@@ -18,7 +19,7 @@ pub const Server = struct {
             .allocator = allocator,
             .broker = broker,
             .listener = try address.listen(.{ .reuse_address = true }),
-            .sessions = std.AutoHashMap(u64, *broker_mod.Session).init(allocator),
+            .sessions = std.AutoHashMap(u64, *session.Session).init(allocator),
         };
     }
 
@@ -26,8 +27,8 @@ pub const Server = struct {
         self.listener.deinit();
 
         self.sessions_mutex.lock();
-        for (self.all_sessions.items) |session| {
-            session.close();
+        for (self.all_sessions.items) |s| {
+            s.close();
         }
         self.sessions_mutex.unlock();
 
@@ -38,8 +39,8 @@ pub const Server = struct {
         self.sessions_mutex.lock();
         defer self.sessions_mutex.unlock();
 
-        for (self.all_sessions.items) |session| {
-            self.allocator.destroy(session);
+        for (self.all_sessions.items) |s| {
+            self.allocator.destroy(s);
         }
         self.all_sessions.deinit(self.allocator);
         self.sessions.deinit();
@@ -52,34 +53,34 @@ pub const Server = struct {
                 else => return,
             };
 
-            const session = try self.makeSession(connection.stream);
-            self.registerSession(session);
+            const s = try self.makeSession(connection.stream);
+            self.registerSession(s);
 
-            const thread = try std.Thread.spawn(.{}, clientMain, .{ self, session });
+            const thread = try std.Thread.spawn(.{}, clientMain, .{ self, s });
             self.client_threads.append(self.allocator, thread) catch |err| {
-                session.close();
-                self.unregisterSession(session.id);
+                s.close();
+                self.unregisterSession(s.id);
                 return err;
             };
         }
     }
 
-    fn makeSession(self: *Server, stream: std.net.Stream) !*broker_mod.Session {
-        const session = try self.allocator.create(broker_mod.Session);
-        session.* = .{
+    fn makeSession(self: *Server, stream: std.net.Stream) !*session.Session {
+        const s = try self.allocator.create(session.Session);
+        s.* = .{
             .id = self.next_session_id,
             .stream = stream,
         };
         self.next_session_id += 1;
-        return session;
+        return s;
     }
 
-    fn registerSession(self: *Server, session: *broker_mod.Session) void {
+    fn registerSession(self: *Server, s: *session.Session) void {
         self.sessions_mutex.lock();
         defer self.sessions_mutex.unlock();
 
-        self.sessions.put(session.id, session) catch @panic("OOM");
-        self.all_sessions.append(self.allocator, session) catch @panic("OOM");
+        self.sessions.put(s.id, s) catch @panic("OOM");
+        self.all_sessions.append(self.allocator, s) catch @panic("OOM");
     }
 
     fn unregisterSession(self: *Server, session_id: u64) void {
@@ -89,82 +90,64 @@ pub const Server = struct {
         _ = self.sessions.remove(session_id);
     }
 
-    fn lookupSession(self: *Server, session_id: u64) ?*broker_mod.Session {
+    fn lookupSession(self: *Server, session_id: u64) ?*session.Session {
         self.sessions_mutex.lock();
         defer self.sessions_mutex.unlock();
         return self.sessions.get(session_id);
     }
 
-    fn sendInfo(self: *Server, session_id: u64) void {
-        const session = self.lookupSession(session_id) orelse return;
-        session.write_mutex.lock();
-        defer session.write_mutex.unlock();
-        if (session.closed) return;
-
-        var frame: [256]u8 = undefined;
-        const port = self.listener.listen_address.getPort();
-        const frame_slice = std.fmt.bufPrint(&frame,
-            "INFO {{\"server_id\":\"zigbee\",\"version\":\"0.1.0\",\"proto\":1,\"host\":\"127.0.0.1\",\"port\":{d},\"max_payload\":1048576}}\r\n",
-            .{port},
-        ) catch return;
-        session.stream.writeAll(frame_slice) catch {};
-    }
-
-    fn sendPong(self: *Server, session_id: u64) void {
-        const session = self.lookupSession(session_id) orelse return;
-        session.write_mutex.lock();
-        defer session.write_mutex.unlock();
-        if (session.closed) return;
-        _ = session.stream.writeAll("PONG\r\n") catch {};
-    }
-
     fn sendErr(self: *Server, session_id: u64, msg: []const u8) void {
-        const session = self.lookupSession(session_id) orelse return;
-        session.write_mutex.lock();
-        defer session.write_mutex.unlock();
-        if (session.closed) return;
-
         var frame: [256]u8 = undefined;
         const frame_slice = std.fmt.bufPrint(&frame, "-ERR '{s}'\r\n", .{msg}) catch return;
-        session.stream.writeAll(frame_slice) catch {};
+        self.writeSessionFrame(session_id, &[_][]const u8{frame_slice});
     }
 
-    fn sendMsg(self: *Server, delivery: broker_mod.Delivery, subject: []const u8, reply: ?[]const u8, payload: []const u8) void {
-        const session = self.lookupSession(delivery.client_id) orelse return;
-        session.write_mutex.lock();
-        defer session.write_mutex.unlock();
-        if (session.closed) return;
+    fn sendMsg(self: *Server, session_id: u64, frame: protocol.OutgoingFrame) void {
+        var buf: [256]u8 = undefined;
+        switch (frame) {
+            .info => |info| {
+                const json = protocol.formatInfoJson(self.allocator, info) catch return;
+                defer self.allocator.free(json);
+                self.writeSessionFrame(session_id, &[_][]const u8{ "INFO ", json, "\r\n" });
+            },
+            .pong => self.writeSessionFrame(session_id, &[_][]const u8{"PONG\r\n"}),
+            .msg => |msg| {
+                const header = formatMsgHeader(&buf, msg) catch return;
+                self.writeSessionFrame(msg.session_id, &[_][]const u8{ header, msg.payload, "\r\n" });
+            },
+        }
+    }
 
-        var frame: [256]u8 = undefined;
-        const header = if (reply) |reply_to| blk: {
-            break :blk std.fmt.bufPrint(&frame, "MSG {s} {d} {s} {d}\r\n", .{ subject, delivery.sid, reply_to, payload.len }) catch return;
-        } else blk: {
-            break :blk std.fmt.bufPrint(&frame, "MSG {s} {d} {d}\r\n", .{ subject, delivery.sid, payload.len }) catch return;
-        };
+    fn writeSessionFrame(self: *Server, session_id: u64, parts: []const []const u8) void {
+        const s = self.lookupSession(session_id) orelse return;
+        s.write_mutex.lock();
+        defer s.write_mutex.unlock();
+        if (s.closed) return;
 
-        session.stream.writeAll(header) catch {
-            session.close();
-            self.unregisterSession(delivery.client_id);
-            return;
-        };
-        session.stream.writeAll(payload) catch {
-            session.close();
-            self.unregisterSession(delivery.client_id);
-            return;
-        };
-        session.stream.writeAll("\r\n") catch {
-            session.close();
-            self.unregisterSession(delivery.client_id);
-        };
+        for (parts) |part| {
+            s.stream.writeAll(part) catch {
+                s.close();
+                self.unregisterSession(session_id);
+                return;
+            };
+        }
     }
 };
 
-fn clientMain(server: *Server, session: *broker_mod.Session) void {
-    defer session.close();
-    defer server.broker.unsubscribeSession(session.id);
-    defer server.unregisterSession(session.id);
+fn formatMsgHeader(buf: []u8, msg: protocol.OutgoingMessage) ![]const u8 {
+    return if (msg.reply) |reply_to| blk: {
+        break :blk std.fmt.bufPrint(buf, "MSG {s} {d} {s} {d}\r\n", .{ msg.subject, msg.sid, reply_to, msg.payload.len });
+    } else blk: {
+        break :blk std.fmt.bufPrint(buf, "MSG {s} {d} {d}\r\n", .{ msg.subject, msg.sid, msg.payload.len });
+    };
+}
 
-    server.sendInfo(session.id);
+fn clientMain(server: *Server, s: *session.Session) void {
+    defer s.close();
+    defer server.broker.unsubscribeSession(s.id);
+    defer server.unregisterSession(s.id);
+
+    server.sendMsg(s.id, .{ .info = .{ .port = server.listener.listen_address.getPort() } });
 
     var reader = protocol.Reader.init(server.allocator);
     defer reader.deinit();
@@ -173,32 +156,38 @@ fn clientMain(server: *Server, session: *broker_mod.Session) void {
 
     while (true) {
         while (reader.next() catch |err| {
-            server.sendErr(session.id, @errorName(err));
+            server.sendErr(s.id, @errorName(err));
             return;
         }) |command| {
             switch (command) {
-                .ping => server.sendPong(session.id),
+                .ping => server.sendMsg(s.id, .pong),
                 .pong => {},
                 .connect => {},
-                .sub => |sub| server.broker.subscribe(session.id, sub.sid, sub.subject, sub.queue) catch |err| {
-                    server.sendErr(session.id, @errorName(err));
+                .sub => |sub| server.broker.subscribe(s.id, sub.sid, sub.subject, sub.queue) catch |err| {
+                    server.sendErr(s.id, @errorName(err));
                     return;
                 },
-                .unsub => |unsub| server.broker.unsubscribe(session.id, unsub.sid, unsub.max),
+                .unsub => |unsub| server.broker.unsubscribe(s.id, unsub.sid, unsub.max),
                 .publish => |publish| {
                     const deliveries = server.broker.publish(publish.subject) catch |err| {
-                        server.sendErr(session.id, @errorName(err));
+                        server.sendErr(s.id, @errorName(err));
                         return;
                     };
                     defer server.allocator.free(deliveries);
                     for (deliveries) |delivery| {
-                        server.sendMsg(delivery, publish.subject, publish.reply, publish.payload);
+                        server.sendMsg(delivery.client_id, .{ .msg = .{
+                            .session_id = delivery.client_id,
+                            .sid = delivery.sid,
+                            .subject = publish.subject,
+                            .reply = publish.reply,
+                            .payload = publish.payload,
+                        } });
                     }
                 },
             }
         }
 
-        const read_len = session.stream.read(&buffer) catch break;
+        const read_len = s.stream.read(&buffer) catch break;
         if (read_len == 0) break;
         reader.feed(buffer[0..read_len]) catch break;
     }

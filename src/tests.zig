@@ -86,7 +86,11 @@ fn mockBroker(stream: std.net.Stream, allocator: std.mem.Allocator) void {
     defer reader.deinit();
 
     var scratch: [4096]u8 = undefined;
-    stream.writeAll("INFO {\"server_id\":\"zigbee\",\"version\":\"0.1.0\",\"proto\":1,\"host\":\"127.0.0.1\",\"port\":0,\"max_payload\":1048576}\r\n") catch return;
+    const info_json = protocol.formatInfoJson(allocator, .{ .port = 0 }) catch return;
+    defer allocator.free(info_json);
+    stream.writeAll("INFO ") catch return;
+    stream.writeAll(info_json) catch return;
+    stream.writeAll("\r\n") catch return;
 
     while (true) {
         const maybe_cmd = readProtocolCommand(&reader, stream, &scratch) catch return;
@@ -101,7 +105,7 @@ fn mockBroker(stream: std.net.Stream, allocator: std.mem.Allocator) void {
             .publish => |publish| {
                 if (publish.reply) |reply_to| {
                     var header: [128]u8 = undefined;
-                    const frame = std.fmt.bufPrint(&header, "MSG {s} 1 2\r\n", .{reply_to}) catch return;
+                    const frame = std.fmt.bufPrint(&header, "MSG {s} 1 {d}\r\n", .{ reply_to, 2 }) catch return;
                     stream.writeAll(frame) catch return;
                     stream.writeAll("ok\r\n") catch return;
                 } else {
@@ -124,12 +128,16 @@ test "client frame reader parses info pong and msg" {
     var reader = client_mod.FrameReader.init(std.testing.allocator);
     defer reader.deinit();
 
-    try reader.feed("INFO {\"server_id\":\"zigbee\",\"version\":\"0.1.0\",\"proto\":1,\"host\":\"127.0.0.1\",\"port\":4222,\"max_payload\":1048576}\r\nPONG\r\nMSG inbox 2 _INBOX.reply 4\r\ntest\r\n");
+    const info_json = try protocol.formatInfoJson(std.testing.allocator, .{ .port = 4222 });
+    defer std.testing.allocator.free(info_json);
+    try reader.feed("INFO ");
+    try reader.feed(info_json);
+    try reader.feed("\r\nPONG\r\nMSG inbox 2 _INBOX.reply 4\r\ntest\r\n");
 
     const info = try reader.next();
     try std.testing.expect(info != null);
     switch (info.?) {
-        .info => |text| try std.testing.expect(std.mem.startsWith(u8, text, "{\"server_id\":\"zigbee\"")),
+        .info => |text| try std.testing.expectEqualStrings(info_json, text),
         else => return error.UnexpectedFrame,
     }
 
@@ -153,7 +161,6 @@ test "client frame reader parses info pong and msg" {
 test "client transport over socketpair" {
     var streams = try makeSocketPair();
     errdefer streams[0].close();
-    errdefer streams[1].close();
 
     const server_thread = try std.Thread.spawn(.{}, runMockBroker, .{streams[1]});
     defer server_thread.join();
