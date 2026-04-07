@@ -3,8 +3,6 @@ const std = @import("std");
 const client_mod = @import("client.zig");
 const protocol_mod = @import("protocol.zig");
 
-const default_server = protocol_mod.default_client_server;
-
 pub fn main() !void {
     var gpa = std.heap.DebugAllocator(.{}).init;
     defer _ = gpa.deinit();
@@ -33,7 +31,7 @@ const Command = union(enum) {
     bench: BenchCommand,
 };
 const BenchCommon = struct {
-    server: []const u8 = default_server,
+    server: []const u8 = protocol_mod.default_client_server,
     clients: usize = 1,
     msgs: u64 = 1000,
     size: usize = 128,
@@ -77,9 +75,7 @@ const BenchCommand = union(enum) {
     latency: BenchLatency,
 };
 
-const ParsedCommand = Command;
-
-fn parseCommand(allocator: std.mem.Allocator, args: []const []const u8) !ParsedCommand {
+fn parseCommand(allocator: std.mem.Allocator, args: []const []const u8) !Command {
     if (args.len <= 1) return error.HelpRequested;
     if (isHelpArg(args[1])) return error.HelpRequested;
 
@@ -94,7 +90,7 @@ fn parseCommand(allocator: std.mem.Allocator, args: []const []const u8) !ParsedC
 
     const verb = cursor.next() orelse return error.MissingCommand;
 
-    var command: ParsedCommand = undefined;
+    var command: Command = undefined;
     if (std.mem.eql(u8, verb, "bench")) {
         command = .{ .bench = try parseBench(allocator, &cursor) };
     } else {
@@ -115,18 +111,29 @@ fn parseCommand(allocator: std.mem.Allocator, args: []const []const u8) !ParsedC
     return command;
 }
 
-fn applyGlobalServer(command: ParsedCommand, server: []const u8) ParsedCommand {
+fn applyGlobalServer(command: Command, server: []const u8) Command {
     return switch (command) {
-        .client => |cmd| .{ .client = switch (cmd) {
-            .publish => |payload| .{ .publish = .{ .server = if (std.mem.eql(u8, payload.server, default_server)) server else payload.server, .subject = payload.subject, .payload = payload.payload, .reply = payload.reply } },
-            .subscribe => |payload| .{ .subscribe = .{ .server = if (std.mem.eql(u8, payload.server, default_server)) server else payload.server, .subject = payload.subject, .queue = payload.queue, .sid = payload.sid, .count = payload.count } },
-            .unsubscribe => |payload| .{ .unsubscribe = .{ .server = if (std.mem.eql(u8, payload.server, default_server)) server else payload.server, .sid = payload.sid, .max = payload.max } },
-            .request => |payload| .{ .request = .{ .server = if (std.mem.eql(u8, payload.server, default_server)) server else payload.server, .subject = payload.subject, .payload = payload.payload } },
-            .reply => |payload| .{ .reply = .{ .server = if (std.mem.eql(u8, payload.server, default_server)) server else payload.server, .subject = payload.subject, .payload = payload.payload, .queue = payload.queue, .sid = payload.sid, .count = payload.count } },
-            .ping => |payload| .{ .ping = .{ .server = if (std.mem.eql(u8, payload.server, default_server)) server else payload.server, .count = payload.count } },
-        } },
+        .client => |cmd| .{ .client = applyClientServer(cmd, server) },
         .bench => |cmd| .{ .bench = applyGlobalServerBench(cmd, server) },
     };
+}
+
+fn applyClientServer(cmd: protocol_mod.ClientCommand, server: []const u8) protocol_mod.ClientCommand {
+    return switch (cmd) {
+        .publish => |payload| .{ .publish = applyServerIfDefault(payload, server) },
+        .subscribe => |payload| .{ .subscribe = applyServerIfDefault(payload, server) },
+        .unsubscribe => |payload| .{ .unsubscribe = applyServerIfDefault(payload, server) },
+        .request => |payload| .{ .request = applyServerIfDefault(payload, server) },
+        .reply => |payload| .{ .reply = applyServerIfDefault(payload, server) },
+        .ping => |payload| .{ .ping = applyServerIfDefault(payload, server) },
+    };
+}
+
+fn applyServerIfDefault(value: anytype, server: []const u8) @TypeOf(value) {
+    if (!std.mem.eql(u8, value.server, protocol_mod.default_client_server)) return value;
+    var updated = value;
+    updated.server = server;
+    return updated;
 }
 
 fn applyGlobalServerBench(cmd: BenchCommand, server: []const u8) BenchCommand {
@@ -140,7 +147,7 @@ fn applyGlobalServerBench(cmd: BenchCommand, server: []const u8) BenchCommand {
 }
 
 fn applyGlobalServerCommon(common: BenchCommon, server: []const u8) BenchCommon {
-    if (std.mem.eql(u8, common.server, default_server)) {
+    if (std.mem.eql(u8, common.server, protocol_mod.default_client_server)) {
         var updated = common;
         updated.server = server;
         return updated;
@@ -148,7 +155,7 @@ fn applyGlobalServerCommon(common: BenchCommon, server: []const u8) BenchCommon 
     return common;
 }
 
-fn runCommand(allocator: std.mem.Allocator, command: ParsedCommand) !void {
+fn runCommand(allocator: std.mem.Allocator, command: Command) !void {
     switch (command) {
         .client => |cmd| switch (cmd) {
             .publish => |payload| try runPublish(allocator, payload),
