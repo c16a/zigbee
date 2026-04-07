@@ -36,17 +36,18 @@ The server listens on `0.0.0.0:4222` by default.
 ## CLI
 
 The CLI connects to a broker with `--server IP:port`. If omitted, it defaults to `127.0.0.1:4222`.
+You can place `--server` before the command name as a global flag.
 
 ### Commands
 
 | Command | Usage |
 | --- | --- |
-| `pub` | `zigbee-cli pub [--server IP:port] [--reply subject] <subject> [payload...]` |
-| `sub` | `zigbee-cli sub [--server IP:port] [--queue name] [--sid n] [--count n] <subject>` |
-| `unsub` | `zigbee-cli unsub [--server IP:port] [--sid n] [--max n]` |
-| `request` | `zigbee-cli request [--server IP:port] <subject> [payload...]` |
-| `reply` | `zigbee-cli reply [--server IP:port] [--queue name] [--sid n] [--count n] <subject> [payload...]` |
-| `ping` | `zigbee-cli ping [--server IP:port] [--count n]` |
+| `pub` | `zigbee-cli [--server IP:port] pub [--reply subject] <subject> [payload...]` |
+| `sub` | `zigbee-cli [--server IP:port] sub [--queue name] [--sid n] [--count n] <subject>` |
+| `unsub` | `zigbee-cli [--server IP:port] unsub [--sid n] [--max n]` |
+| `request` | `zigbee-cli [--server IP:port] request <subject> [payload...]` |
+| `reply` | `zigbee-cli [--server IP:port] reply [--queue name] [--sid n] [--count n] <subject> [payload...]` |
+| `ping` | `zigbee-cli [--server IP:port] ping [--count n]` |
 | `bench` | `zigbee-cli bench <pub|sub|request|reply|latency> ...` |
 
 ### Command Notes
@@ -56,7 +57,7 @@ The CLI connects to a broker with `--server IP:port`. If omitted, it defaults to
 - `unsub` sends an unsubscribe control frame for a subscription id.
 - `request` publishes a message with a temporary reply inbox and waits for one reply.
 - `reply` subscribes to a subject and replies to each incoming request with the provided payload.
-- `ping` sends PING/PONG round trips and prints their latency.
+- `ping` sends PING/PONG round trips.
 
 ## Benchmarking
 
@@ -90,19 +91,19 @@ Benchmarking lives under `zigbee-cli bench`.
 - `bench sub` receives messages and measures subscription throughput.
 - `bench request` sends request/reply traffic and waits for responses.
 - `bench reply` runs a queue-backed responder that answers requests.
-- `bench latency` measures PING/PONG round-trip latency.
+- `bench latency` runs PING/PONG round trips.
 
 ## Examples
 
 ```sh
-zigbee-cli ping
-zigbee-cli pub foo "hello world"
-zigbee-cli sub foo
-zigbee-cli request foo "who is there?"
-zigbee-cli reply foo "it works"
-zigbee-cli bench pub foo --clients 4 --msgs 1000000 --size 128
-zigbee-cli bench sub foo --clients 4 --msgs 1000000
-zigbee-cli bench request foo --clients 4 --msgs 100000
-zigbee-cli bench reply foo --clients 4 --msgs 100000 --queue bench
-zigbee-cli bench latency --msgs 100000
+zigbee-cli --server 127.0.0.1:4222 ping
+zigbee-cli --server 127.0.0.1:4222 pub foo "hello world"
+zigbee-cli --server 127.0.0.1:4222 sub foo
+zigbee-cli --server 127.0.0.1:4222 request foo "who is there?"
+zigbee-cli --server 127.0.0.1:4222 reply foo "it works"
+zigbee-cli --server 127.0.0.1:4222 bench pub foo --clients 4 --msgs 1000000 --size 128
+zigbee-cli --server 127.0.0.1:4222 bench sub foo --clients 4 --msgs 1000000
+zigbee-cli --server 127.0.0.1:4222 bench request foo --clients 4 --msgs 100000
+zigbee-cli --server 127.0.0.1:4222 bench reply foo --clients 4 --msgs 100000 --queue bench
+zigbee-cli --server 127.0.0.1:4222 bench latency --msgs 100000
 ```
