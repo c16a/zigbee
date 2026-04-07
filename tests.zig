@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 const std = @import("std");
+const client_mod = @import("client.zig");
 const broker_mod = @import("broker.zig");
 const protocol = @import("protocol.zig");
 const server_mod = @import("server.zig");
@@ -107,6 +108,7 @@ test "end to end pub sub unsubscribe and request reply" {
     const serve_thread = try std.Thread.spawn(.{}, server_mod.Server.serve, .{ &server });
     defer serve_thread.join();
     defer server.deinit();
+    std.Thread.sleep(10 * std.time.ns_per_ms);
 
     const port = server.listener.listen_address.getPort();
     const client_address = try std.net.Address.parseIp("127.0.0.1", port);
@@ -122,6 +124,10 @@ test "end to end pub sub unsubscribe and request reply" {
     defer allocator.free(publisher_info);
 
     try subscriber.writeAll("SUB foo 1\r\n");
+    try subscriber.writeAll("PING\r\n");
+    const subscriber_pong = try readLine(subscriber, allocator);
+    defer allocator.free(subscriber_pong);
+    try std.testing.expectEqualStrings("PONG\r\n", subscriber_pong);
     try publisher.writeAll("PUB foo 5\r\nhello\r\n");
 
     const delivered = try readFrame(subscriber, allocator);
@@ -129,6 +135,10 @@ test "end to end pub sub unsubscribe and request reply" {
     try std.testing.expectEqualStrings("hello", delivered);
 
     try subscriber.writeAll("UNSUB 1\r\n");
+    try subscriber.writeAll("PING\r\n");
+    const unsub_pong = try readLine(subscriber, allocator);
+    defer allocator.free(unsub_pong);
+    try std.testing.expectEqualStrings("PONG\r\n", unsub_pong);
     try publisher.writeAll("PUB foo 5\r\nagain\r\n");
 
     var poll_fds = [_]std.posix.pollfd{
@@ -137,7 +147,15 @@ test "end to end pub sub unsubscribe and request reply" {
     try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&poll_fds, 0));
 
     try subscriber.writeAll("SUB inbox 2\r\n");
+    try subscriber.writeAll("PING\r\n");
+    const inbox_pong = try readLine(subscriber, allocator);
+    defer allocator.free(inbox_pong);
+    try std.testing.expectEqualStrings("PONG\r\n", inbox_pong);
     try publisher.writeAll("SUB _INBOX.reply 3\r\n");
+    try publisher.writeAll("PING\r\n");
+    const reply_pong = try readLine(publisher, allocator);
+    defer allocator.free(reply_pong);
+    try std.testing.expectEqualStrings("PONG\r\n", reply_pong);
     try publisher.writeAll("PUB inbox _INBOX.reply 4\r\ntest\r\n");
 
     const request_msg = try readLine(subscriber, allocator);
@@ -148,4 +166,45 @@ test "end to end pub sub unsubscribe and request reply" {
     const reply = try readFrame(publisher, allocator);
     defer allocator.free(reply);
     try std.testing.expectEqualStrings("ok", reply);
+}
+
+test "client handshake ping and pub sub" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+
+    var thread_safe = std.heap.ThreadSafeAllocator{
+        .child_allocator = gpa.allocator(),
+    };
+    const allocator = thread_safe.allocator();
+
+    var broker = broker_mod.Broker.init(allocator);
+    defer broker.deinit();
+
+    const address = try std.net.Address.parseIp("127.0.0.1", 0);
+    var server = try server_mod.Server.start(allocator, &broker, address);
+
+    const serve_thread = try std.Thread.spawn(.{}, server_mod.Server.serve, .{ &server });
+    defer serve_thread.join();
+    defer server.deinit();
+    std.Thread.sleep(10 * std.time.ns_per_ms);
+
+    const port = server.listener.listen_address.getPort();
+    const broker_address = try std.net.Address.parseIp("127.0.0.1", port);
+
+    var pinger = try client_mod.Client.connect(allocator, broker_address);
+    defer pinger.deinit();
+    try pinger.ping();
+
+    const subject = "svc.echo";
+    var subscriber = try client_mod.Client.connect(allocator, broker_address);
+    defer subscriber.deinit();
+    try subscriber.subscribe(subject, null, 1);
+    try subscriber.ping();
+
+    var publisher = try client_mod.Client.connect(allocator, broker_address);
+    defer publisher.deinit();
+    try publisher.publish(subject, null, "hello");
+
+    const message = try subscriber.waitForMessage(subject);
+    try std.testing.expectEqualStrings("hello", message.payload);
 }
