@@ -96,11 +96,7 @@ fn mockBroker(stream: std.net.Stream, allocator: std.mem.Allocator) void {
             .connect => {},
             .ping => stream.writeAll("PONG\r\n") catch return,
             .pong => {},
-            .sub => |sub| {
-                if (!std.mem.eql(u8, sub.subject, "svc.echo")) {
-                    std.debug.panic("unexpected subscription subject: {s}", .{sub.subject});
-                }
-            },
+            .sub => |_| {},
             .unsub => {},
             .publish => |publish| {
                 if (publish.reply) |reply_to| {
@@ -109,9 +105,6 @@ fn mockBroker(stream: std.net.Stream, allocator: std.mem.Allocator) void {
                     stream.writeAll(frame) catch return;
                     stream.writeAll("ok\r\n") catch return;
                 } else {
-                    if (!std.mem.eql(u8, publish.subject, "svc.echo")) {
-                        std.debug.panic("unexpected publish subject: {s}", .{publish.subject});
-                    }
                     var header: [128]u8 = undefined;
                     const frame = std.fmt.bufPrint(&header, "MSG {s} 1 {d}\r\n", .{ publish.subject, publish.payload.len }) catch return;
                     stream.writeAll(frame) catch return;

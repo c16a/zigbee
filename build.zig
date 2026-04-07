@@ -7,8 +7,8 @@ pub fn build(b: *std.Build) void {
     // without needing `-Doptimize=...` on the command line.
     const optimize = .ReleaseSafe;
 
-    const server_exe = makeExecutable(b, "zigbee", "main.zig", target, optimize);
-    const cli_exe = makeExecutable(b, "zigbee-cli", "cli.zig", target, optimize);
+    const server_exe = makeExecutable(b, "zigbee", "src/main.zig", target, optimize);
+    const cli_exe = makeExecutable(b, "zigbee-cli", "src/cli.zig", target, optimize);
 
     b.installArtifact(server_exe);
     b.installArtifact(cli_exe);
@@ -33,7 +33,7 @@ pub fn build(b: *std.Build) void {
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests.zig"),
+            .root_source_file = b.path("src/tests.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -41,7 +41,7 @@ pub fn build(b: *std.Build) void {
     });
     const cli_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("cli.zig"),
+            .root_source_file = b.path("src/cli.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -109,8 +109,8 @@ fn addCrossTarget(b: *std.Build, cross_step: *std.Build.Step, optimize: std.buil
     }) catch @panic("invalid cross target");
     const resolved_target = b.resolveTargetQuery(target_query);
 
-    const server_exe = makeExecutable(b, "zigbee", "main.zig", resolved_target, optimize);
-    const cli_exe = makeExecutable(b, "zigbee-cli", "cli.zig", resolved_target, optimize);
+    const server_exe = makeExecutable(b, "zigbee", "src/main.zig", resolved_target, optimize);
+    const cli_exe = makeExecutable(b, "zigbee-cli", "src/cli.zig", resolved_target, optimize);
 
     const server_install = b.addInstallArtifact(server_exe, .{
         .dest_sub_path = b.fmt("{s}/{s}", .{ spec.output_dir, server_exe.out_filename }),
