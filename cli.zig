@@ -120,17 +120,70 @@ const ParsedCommand = Command;
 
 fn parseCommand(allocator: std.mem.Allocator, args: []const []const u8) !ParsedCommand {
     var cursor = ArgCursor.init(args[1..]);
+    var global_server: ?[]const u8 = null;
+
+    while (cursor.peek()) |arg| {
+        if (!std.mem.eql(u8, arg, "--server")) break;
+        _ = cursor.next();
+        global_server = try takeValue(&cursor, "--server");
+    }
+
     const verb = cursor.next() orelse return error.MissingCommand;
 
-    if (std.mem.eql(u8, verb, "pub")) return .{ .publish = try parsePublish(allocator, &cursor) };
-    if (std.mem.eql(u8, verb, "sub")) return .{ .subscribe = try parseSubscribe(allocator, &cursor) };
-    if (std.mem.eql(u8, verb, "unsub")) return .{ .unsubscribe = try parseUnsubscribe(&cursor) };
-    if (std.mem.eql(u8, verb, "request")) return .{ .request = try parseRequest(allocator, &cursor) };
-    if (std.mem.eql(u8, verb, "reply")) return .{ .reply = try parseReply(allocator, &cursor) };
-    if (std.mem.eql(u8, verb, "ping")) return .{ .ping = try parsePing(&cursor) };
-    if (std.mem.eql(u8, verb, "bench")) return .{ .bench = try parseBench(allocator, &cursor) };
+    var command: ParsedCommand = undefined;
+    if (std.mem.eql(u8, verb, "pub")) {
+        command = .{ .publish = try parsePublish(allocator, &cursor) };
+    } else if (std.mem.eql(u8, verb, "sub")) {
+        command = .{ .subscribe = try parseSubscribe(allocator, &cursor) };
+    } else if (std.mem.eql(u8, verb, "unsub")) {
+        command = .{ .unsubscribe = try parseUnsubscribe(&cursor) };
+    } else if (std.mem.eql(u8, verb, "request")) {
+        command = .{ .request = try parseRequest(allocator, &cursor) };
+    } else if (std.mem.eql(u8, verb, "reply")) {
+        command = .{ .reply = try parseReply(allocator, &cursor) };
+    } else if (std.mem.eql(u8, verb, "ping")) {
+        command = .{ .ping = try parsePing(&cursor) };
+    } else if (std.mem.eql(u8, verb, "bench")) {
+        command = .{ .bench = try parseBench(allocator, &cursor) };
+    } else {
+        return error.UnknownCommand;
+    }
 
-    return error.UnknownCommand;
+    if (global_server) |server| {
+        command = applyGlobalServer(command, server);
+    }
+    return command;
+}
+
+fn applyGlobalServer(command: ParsedCommand, server: []const u8) ParsedCommand {
+    return switch (command) {
+        .publish => |cmd| .{ .publish = .{ .server = if (std.mem.eql(u8, cmd.server, default_server)) server else cmd.server, .subject = cmd.subject, .payload = cmd.payload, .reply = cmd.reply } },
+        .subscribe => |cmd| .{ .subscribe = .{ .server = if (std.mem.eql(u8, cmd.server, default_server)) server else cmd.server, .subject = cmd.subject, .queue = cmd.queue, .sid = cmd.sid, .count = cmd.count } },
+        .unsubscribe => |cmd| .{ .unsubscribe = .{ .server = if (std.mem.eql(u8, cmd.server, default_server)) server else cmd.server, .sid = cmd.sid, .max = cmd.max } },
+        .request => |cmd| .{ .request = .{ .server = if (std.mem.eql(u8, cmd.server, default_server)) server else cmd.server, .subject = cmd.subject, .payload = cmd.payload } },
+        .reply => |cmd| .{ .reply = .{ .server = if (std.mem.eql(u8, cmd.server, default_server)) server else cmd.server, .subject = cmd.subject, .payload = cmd.payload, .queue = cmd.queue, .sid = cmd.sid, .count = cmd.count } },
+        .ping => |cmd| .{ .ping = .{ .server = if (std.mem.eql(u8, cmd.server, default_server)) server else cmd.server, .count = cmd.count } },
+        .bench => |cmd| .{ .bench = applyGlobalServerBench(cmd, server) },
+    };
+}
+
+fn applyGlobalServerBench(cmd: BenchCommand, server: []const u8) BenchCommand {
+    return switch (cmd) {
+        .publish => |bench| .{ .publish = .{ .common = applyGlobalServerCommon(bench.common, server), .subject = bench.subject } },
+        .subscribe => |bench| .{ .subscribe = .{ .common = applyGlobalServerCommon(bench.common, server), .subject = bench.subject } },
+        .request => |bench| .{ .request = .{ .common = applyGlobalServerCommon(bench.common, server), .subject = bench.subject } },
+        .reply => |bench| .{ .reply = .{ .common = applyGlobalServerCommon(bench.common, server), .subject = bench.subject, .queue = bench.queue } },
+        .latency => |bench| .{ .latency = .{ .common = applyGlobalServerCommon(bench.common, server) } },
+    };
+}
+
+fn applyGlobalServerCommon(common: BenchCommon, server: []const u8) BenchCommon {
+    if (std.mem.eql(u8, common.server, default_server)) {
+        var updated = common;
+        updated.server = server;
+        return updated;
+    }
+    return common;
 }
 
 fn runCommand(allocator: std.mem.Allocator, command: ParsedCommand) !void {
@@ -974,6 +1027,13 @@ test "parse publish command" {
     try std.testing.expectEqualStrings("foo", cmd.publish.subject);
     try std.testing.expectEqualStrings("hello world", cmd.publish.payload);
     try std.testing.expectEqualStrings("127.0.0.1:4222", cmd.publish.server);
+}
+
+test "parse global server ping command" {
+    const argv = [_][]const u8{ "zigbee-cli", "--server", "127.0.0.1:4222", "ping" };
+    const cmd = try parseCommand(std.testing.allocator, argv[0..]);
+    try std.testing.expect(cmd == .ping);
+    try std.testing.expectEqualStrings("127.0.0.1:4222", cmd.ping.server);
 }
 
 test "parse bench request command" {

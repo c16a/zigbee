@@ -23,6 +23,7 @@ pub fn main() !void {
     var server = try server_mod.Server.start(allocator, &broker, address);
     defer server.deinit();
 
+    std.log.info("zigbee server listening on 0.0.0.0:{d}", .{port});
     try server.serve();
 }
 
