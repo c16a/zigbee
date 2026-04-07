@@ -1,0 +1,4 @@
+interface:
+  display_name: "Commit Staged Files"
+  short_description: "Create a clean commit from staged changes"
+  default_prompt: "Use $commit-staged-files to inspect the staged diff, write a commit message that matches it, and create the commit."

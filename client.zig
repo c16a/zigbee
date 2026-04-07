@@ -129,14 +129,18 @@ pub const Client = struct {
     scratch: [4096]u8 = undefined,
 
     pub fn connect(allocator: std.mem.Allocator, address: std.net.Address) !Client {
-        var stream = try std.net.tcpConnectToAddress(address);
-        errdefer stream.close();
+        const stream = try std.net.tcpConnectToAddress(address);
+        return fromStream(allocator, stream);
+    }
+
+    pub fn fromStream(allocator: std.mem.Allocator, stream: std.net.Stream) !Client {
         var client = Client{
             .allocator = allocator,
             .stream = stream,
             .reader = FrameReader.init(allocator),
         };
         errdefer client.reader.deinit();
+        errdefer client.stream.close();
 
         while (true) {
             const frame = try client.nextFrame() orelse return error.UnexpectedEndOfStream;
