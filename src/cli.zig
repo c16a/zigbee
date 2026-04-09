@@ -119,6 +119,7 @@ fn parseCommand(allocator: std.mem.Allocator, args: []const []const u8) !ParsedC
             .request => .{ .request = try parseRequest(allocator, &cursor) },
             .reply => .{ .reply = try parseReply(allocator, &cursor) },
             .ping => .{ .ping = try parsePing(&cursor) },
+            .session => .{ .session = try parseSession(&cursor) },
         } };
     }
 
@@ -146,6 +147,7 @@ fn applyClientServer(cmd: protocol_mod.ClientCommand, server: []const u8) protoc
         .request => |payload| .{ .request = applyServerIfDefault(payload, server) },
         .reply => |payload| .{ .reply = applyServerIfDefault(payload, server) },
         .ping => |payload| .{ .ping = applyServerIfDefault(payload, server) },
+        .session => |payload| .{ .session = applyServerIfDefault(payload, server) },
     };
 }
 
@@ -184,6 +186,7 @@ fn runCommand(allocator: std.mem.Allocator, command: Command, auth: ?client_mod.
             .request => |payload| try runRequest(allocator, payload, auth),
             .reply => |payload| try runReply(allocator, payload, auth),
             .ping => |payload| try runPing(allocator, payload, auth),
+            .session => |payload| try runSession(allocator, payload, auth),
         },
         .bench => |cmd| try runBench(allocator, cmd, auth),
     }
@@ -373,6 +376,18 @@ fn parsePing(cursor: *ArgCursor) !protocol_mod.ClientPing {
         }
         if (std.mem.eql(u8, arg, "--count")) {
             cmd.count = try parseU64(try takeValue(cursor, "--count"));
+            continue;
+        }
+        return error.UnexpectedArgument;
+    }
+    return cmd;
+}
+
+fn parseSession(cursor: *ArgCursor) !protocol_mod.ClientSession {
+    var cmd = protocol_mod.ClientSession{};
+    while (cursor.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--server")) {
+            cmd.server = try takeValue(cursor, "--server");
             continue;
         }
         return error.UnexpectedArgument;
@@ -584,6 +599,11 @@ fn runPing(allocator: std.mem.Allocator, cmd: protocol_mod.ClientPing, auth: ?cl
         try client.ping();
         std.debug.print("PONG\n", .{});
     }
+}
+
+fn runSession(allocator: std.mem.Allocator, cmd: protocol_mod.ClientSession, auth: ?client_mod.Auth) !void {
+    const address = try client_mod.parseServerAddress(cmd.server);
+    try client_mod.runSession(allocator, address, auth);
 }
 
 fn connectClient(allocator: std.mem.Allocator, server: []const u8, auth: ?client_mod.Auth) !client_mod.Client {
@@ -1046,6 +1066,14 @@ test "parse global server ping command" {
     try std.testing.expect(parsed.command == .client);
     try std.testing.expect(parsed.command.client == .ping);
     try std.testing.expectEqualStrings("127.0.0.1:4222", parsed.command.client.ping.server);
+}
+
+test "parse session command" {
+    const argv = [_][]const u8{ "zigbee-cli", "session" };
+    const parsed = try parseCommand(std.testing.allocator, argv[0..]);
+    try std.testing.expect(parsed.command == .client);
+    try std.testing.expect(parsed.command.client == .session);
+    try std.testing.expectEqualStrings(protocol_mod.default_client_server, parsed.command.client.session.server);
 }
 
 test "parse bench request command" {

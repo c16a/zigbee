@@ -70,6 +70,26 @@ test "config file loads listen address" {
     try std.testing.expect(loaded != null);
     defer loaded.?.deinit();
     try std.testing.expectEqualStrings("127.0.0.1:4222", loaded.?.value().listen_address.?);
+    try std.testing.expect(loaded.?.value().verbose);
+}
+
+test "config verbose can be disabled" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "zigbee.config.json",
+        .data = "{\"verbose\":false}",
+    });
+
+    var loaded = try config_mod.loadFromDir(tmp.dir, allocator, "zigbee.config.json", true);
+    try std.testing.expect(loaded != null);
+    defer loaded.?.deinit();
+    try std.testing.expect(!loaded.?.value().verbose);
 }
 
 test "auth store validates keys and permissions" {
@@ -146,19 +166,26 @@ fn mockBroker(stream: std.net.Stream, allocator: std.mem.Allocator) void {
             }) catch return;
             defer parsed.deinit();
             if (!std.mem.eql(u8, parsed.value.auth_mode, "none")) @panic("mockBroker: expected auth_mode=none");
+            stream.writeAll("OK\r\n") catch return;
         },
         else => return,
     }
 
     const ping_cmd = readProtocolCommand(&reader, stream, &scratch) catch return;
     switch (ping_cmd orelse return) {
-        .ping => stream.writeAll("PONG\r\n") catch return,
+        .ping => {
+            stream.writeAll("PONG\r\n") catch return;
+            stream.writeAll("OK\r\n") catch return;
+        },
         else => return,
     }
 
     const first_sub = readProtocolCommand(&reader, stream, &scratch) catch return;
     switch (first_sub orelse return) {
-        .sub => |sub| if (!std.mem.eql(u8, sub.subject, "svc.echo")) @panic("mockBroker: expected svc.echo subscription"),
+        .sub => |sub| {
+            if (!std.mem.eql(u8, sub.subject, "svc.echo")) @panic("mockBroker: expected svc.echo subscription");
+            stream.writeAll("OK\r\n") catch return;
+        },
         else => return,
     }
 
@@ -173,6 +200,7 @@ fn mockBroker(stream: std.net.Stream, allocator: std.mem.Allocator) void {
             stream.writeAll(frame) catch return;
             stream.writeAll(publish.payload) catch return;
             stream.writeAll("\r\n") catch return;
+            stream.writeAll("OK\r\n") catch return;
         },
         else => return,
     }
@@ -180,7 +208,10 @@ fn mockBroker(stream: std.net.Stream, allocator: std.mem.Allocator) void {
     const inbox_sub = readProtocolCommand(&reader, stream, &scratch) catch return;
     const inbox_subject = blk: {
         switch (inbox_sub orelse return) {
-            .sub => |sub| break :blk allocator.dupe(u8, sub.subject) catch return,
+            .sub => |sub| {
+                stream.writeAll("OK\r\n") catch return;
+                break :blk allocator.dupe(u8, sub.subject) catch return;
+            },
             else => return,
         }
     };
@@ -198,13 +229,17 @@ fn mockBroker(stream: std.net.Stream, allocator: std.mem.Allocator) void {
             const frame = std.fmt.bufPrint(&header, "MSG {s} 1 {d}\r\n", .{ publish.reply.?, 2 }) catch return;
             stream.writeAll(frame) catch return;
             stream.writeAll("ok\r\n") catch return;
+            stream.writeAll("OK\r\n") catch return;
         },
         else => return,
     }
 
     const unsub_cmd = readProtocolCommand(&reader, stream, &scratch) catch return;
     switch (unsub_cmd orelse return) {
-        .unsub => |unsub| if (unsub.sid != 1) @panic("mockBroker: expected unsubscribe sid 1"),
+        .unsub => |unsub| {
+            if (unsub.sid != 1) @panic("mockBroker: expected unsubscribe sid 1");
+            stream.writeAll("OK\r\n") catch return;
+        },
         else => return,
     }
 }
@@ -232,7 +267,10 @@ fn mockOpenBroker(stream: std.net.Stream, allocator: std.mem.Allocator) void {
 
     const first_sub = readProtocolCommand(&reader, stream, &scratch) catch return;
     switch (first_sub orelse return) {
-        .sub => |sub| if (!std.mem.eql(u8, sub.subject, "svc.echo")) @panic("mockOpenBroker: expected svc.echo subscription"),
+        .sub => |sub| {
+            if (!std.mem.eql(u8, sub.subject, "svc.echo")) @panic("mockOpenBroker: expected svc.echo subscription");
+            stream.writeAll("OK\r\n") catch return;
+        },
         else => return,
     }
 
@@ -247,6 +285,7 @@ fn mockOpenBroker(stream: std.net.Stream, allocator: std.mem.Allocator) void {
             stream.writeAll(frame) catch return;
             stream.writeAll(publish.payload) catch return;
             stream.writeAll("\r\n") catch return;
+            stream.writeAll("OK\r\n") catch return;
         },
         else => return,
     }
@@ -264,7 +303,7 @@ test "client frame reader parses info pong and msg" {
     defer allocator.free(info_json);
     try reader.feed("INFO ");
     try reader.feed(info_json);
-    try reader.feed("\r\nPONG\r\nMSG inbox 2 _INBOX.reply 4\r\ntest\r\n");
+    try reader.feed("\r\nOK\r\nPONG\r\nOK\r\nMSG inbox 2 _INBOX.reply 4\r\ntest\r\n");
 
     const info = try reader.next();
     try std.testing.expect(info != null);
@@ -281,9 +320,17 @@ test "client frame reader parses info pong and msg" {
         else => return error.UnexpectedFrame,
     }
 
+    const ok = try reader.next();
+    try std.testing.expect(ok != null);
+    try std.testing.expect(ok.? == .ok);
+
     const pong = try reader.next();
     try std.testing.expect(pong != null);
     try std.testing.expect(pong.? == .pong);
+
+    const ok2 = try reader.next();
+    try std.testing.expect(ok2 != null);
+    try std.testing.expect(ok2.? == .ok);
 
     const msg = try reader.next();
     try std.testing.expect(msg != null);
@@ -296,6 +343,11 @@ test "client frame reader parses info pong and msg" {
         },
         else => return error.UnexpectedFrame,
     }
+
+    try reader.feed("CLOSE\r\n");
+    const close_frame = try reader.next();
+    try std.testing.expect(close_frame != null);
+    try std.testing.expect(close_frame.? == .close);
 }
 
 test "client transport over socketpair" {
@@ -360,6 +412,7 @@ test "unauthenticated raw client can publish and subscribe" {
     while (true) {
         if (try reader.next()) |frame| {
             switch (frame) {
+                .ok => continue,
                 .msg => |msg| {
                     try std.testing.expectEqualStrings("svc.echo", msg.subject);
                     try std.testing.expectEqualStrings("hello", msg.payload);
@@ -421,10 +474,14 @@ fn mockZkeyBroker(stream: std.net.Stream, allocator: std.mem.Allocator) void {
 
     const expected_public_key = key_pair.public_key.toBytes();
     if (!std.mem.eql(u8, decoded_public_key.bytes[0..], expected_public_key[0..])) @panic("mockZkeyBroker: expected derived public key");
+    stream.writeAll("OK\r\n") catch return;
 
     const ping_cmd = readProtocolCommand(&reader, stream, &scratch) catch return;
     switch (ping_cmd orelse return) {
-        .ping => stream.writeAll("PONG\r\n") catch return,
+        .ping => {
+            stream.writeAll("PONG\r\n") catch return;
+            stream.writeAll("OK\r\n") catch return;
+        },
         else => return,
     }
 }

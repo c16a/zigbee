@@ -14,5 +14,5 @@ If the broker does not require auth, `--zkey-seed` is optional and `CONNECT` is 
 - [request](commands/request.md)
 - [reply](commands/reply.md)
 - [ping](commands/ping.md)
+- [session](commands/session.md)
 - [bench](commands/bench.md)
-
