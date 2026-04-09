@@ -23,6 +23,7 @@ pub fn main() !void {
         },
         else => return err,
     };
+    defer deinitParsedCommand(allocator, parsed.command);
 
     const auth = if (parsed.zkey_seed_path) |path| try client_mod.loadAuthFromSeedFile(allocator, path) else null;
     try runCommand(allocator, parsed.command, auth);
@@ -185,6 +186,18 @@ fn runCommand(allocator: std.mem.Allocator, command: Command, auth: ?client_mod.
             .ping => |payload| try runPing(allocator, payload, auth),
         },
         .bench => |cmd| try runBench(allocator, cmd, auth),
+    }
+}
+
+fn deinitParsedCommand(allocator: std.mem.Allocator, command: Command) void {
+    switch (command) {
+        .client => |cmd| switch (cmd) {
+            .publish => |payload| allocator.free(payload.payload),
+            .request => |payload| allocator.free(payload.payload),
+            .reply => |payload| allocator.free(payload.payload),
+            else => {},
+        },
+        .bench => {},
     }
 }
 
