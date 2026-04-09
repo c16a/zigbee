@@ -405,8 +405,9 @@ const RunningServer = struct {
     fn deinit(self: *RunningServer) void {
         const thread = self.thread;
         self.thread = null;
-        self.server.deinit();
+        self.server.requestStop();
         if (thread) |handle| handle.join();
+        self.server.deinit();
         self.allocator.destroy(self.server);
         self.broker.deinit();
         self.allocator.destroy(self);

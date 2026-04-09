@@ -116,18 +116,6 @@ pub fn build(b: *std.Build) void {
         .target_triple = "aarch64-macos-none",
         .output_dir = "macos-arm64",
     });
-    addCrossTarget(b, cross_step, optimize, .{
-        .step_name = "windows-amd64",
-        .description = "Build Windows AMD64",
-        .target_triple = "x86_64-windows-gnu",
-        .output_dir = "windows-amd64",
-    });
-    addCrossTarget(b, cross_step, optimize, .{
-        .step_name = "windows-arm64",
-        .description = "Build Windows ARM64",
-        .target_triple = "aarch64-windows-gnu",
-        .output_dir = "windows-arm64",
-    });
 }
 
 fn makeExecutable(b: *std.Build, name: []const u8, root_source: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, link_libc: bool) *std.Build.Step.Compile {
@@ -209,7 +197,7 @@ fn addCrossTarget(b: *std.Build, cross_step: *std.Build.Step, optimize: std.buil
         .target = resolved_target,
         .optimize = optimize,
     });
-    const needs_libc = resolved_target.result.os.tag == .windows;
+    const needs_libc = true;
     const server_exe = makeExecutable(b, "zigbee", "src/server/main.zig", resolved_target, optimize, needs_libc);
     server_exe.root_module.addImport("common_client", common_client);
     const cli_modules = makeCliModules(b, resolved_target, optimize, common_client);
