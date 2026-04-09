@@ -3,9 +3,10 @@ const std = @import("std");
 const broker_mod = @import("broker.zig");
 const auth_mod = @import("auth.zig");
 const config_mod = @import("config.zig");
-const crypto_mod = @import("crypto.zig");
+const common_mod = @import("common_client");
+const crypto_mod = common_mod.crypto_mod;
 const session = @import("session.zig");
-const protocol = @import("protocol.zig");
+const protocol = common_mod.protocol_mod;
 
 pub const Server = struct {
     allocator: std.mem.Allocator,

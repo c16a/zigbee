@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 const std = @import("std");
-const auth_mod = @import("auth.zig");
-const config_mod = @import("config.zig");
-const client_mod = @import("client.zig");
-const crypto_mod = @import("crypto.zig");
-const broker_mod = @import("broker.zig");
-const protocol = @import("protocol.zig");
+const auth_mod = @import("server/auth.zig");
+const config_mod = @import("server/config.zig");
+const client_mod = @import("common_client");
+const crypto_mod = client_mod.crypto_mod;
+const broker_mod = @import("server/broker.zig");
+const protocol = client_mod.protocol_mod;
 
 test "protocol partial parsing and malformed frames" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
