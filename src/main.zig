@@ -24,10 +24,12 @@ pub fn main() !void {
     defer broker.deinit();
 
     const address = try resolveListenAddress(config);
-    var server = try server_mod.Server.start(allocator, &broker, address);
+    const listen_text = if (config) |loaded| loaded.value().listen_address orelse "0.0.0.0:4222" else "0.0.0.0:4222";
+    const auth_cfg = if (config) |loaded| loaded.value().auth else null;
+    var server = try server_mod.Server.start(allocator, &broker, address, auth_cfg);
     defer server.deinit();
 
-    std.log.info("zigbee server listening on {any}", .{address});
+    std.log.info("zigbee server listening on {s}", .{listen_text});
     try server.serve();
 }
 

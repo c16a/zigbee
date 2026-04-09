@@ -27,10 +27,23 @@ pub const Info = struct {
     host: []const u8 = "127.0.0.1",
     port: u16,
     max_payload: u32 = 1048576,
+    auth_required: bool = false,
+    auth_mode: []const u8 = "none",
+    nonce: ?[]const u8 = null,
 };
 
 pub fn formatInfoJson(allocator: std.mem.Allocator, info: Info) ![]u8 {
     return try std.json.Stringify.valueAlloc(allocator, info, .{});
+}
+
+pub const Connect = struct {
+    auth_mode: []const u8 = "none",
+    public_key: ?[]const u8 = null,
+    signature: ?[]const u8 = null,
+};
+
+pub fn formatConnectJson(allocator: std.mem.Allocator, connect: Connect) ![]u8 {
+    return try std.json.Stringify.valueAlloc(allocator, connect, .{});
 }
 
 pub const OutgoingMessage = struct {
@@ -183,7 +196,7 @@ pub const Reader = struct {
     }
 
     pub fn next(self: *Reader) !?Command {
-        if (self.cursor > 0 and self.cursor > self.buffer.items.len / 2) {
+        if (self.pending_publish == null and self.cursor > 0 and self.cursor > self.buffer.items.len / 2) {
             self.compact();
         }
 
