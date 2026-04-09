@@ -1,0 +1,12 @@
+.{
+    .name = .zigbee,
+    .version = "0.15.2",
+    .dependencies = .{
+        .libxev = .{
+            .url = "git+https://github.com/mitchellh/libxev.git#d398cba9bf711fa4dd21c48bf73d25e4d8986408",
+            .hash = "libxev-0.0.0-86vtc689EwAjQWysidPm9NKkAwwUNByiE3kZTg_xu0Hp",
+        },
+    },
+    .paths = .{""},
+    .fingerprint = 0x47a940f9dbd86ce8,
+}

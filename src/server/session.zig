@@ -4,16 +4,23 @@ const auth_mod = @import("auth.zig");
 const common_mod = @import("common_client");
 const crypto_mod = common_mod.crypto_mod;
 const protocol = common_mod.protocol_mod;
+const xev = @import("xev");
 
 pub const Session = struct {
     id: u64,
-    stream: std.net.Stream,
+    stream: xev.TCP,
     address: std.net.Address,
+    manager_ctx: *anyopaque,
     mutex: std.Thread.Mutex = .{},
     reader: protocol.Reader,
+    read_buffer: [4096]u8 = undefined,
+    read_completion: xev.Completion = .{},
+    write_completion: xev.Completion = .{},
     write_buffer: std.ArrayList(u8) = .empty,
     write_offset: usize = 0,
     write_armed: bool = false,
+    read_active: bool = false,
+    write_active: bool = false,
     closing: bool = false,
     closed: bool = false,
     saw_connect: bool = false,
@@ -25,8 +32,9 @@ pub const Session = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         id: u64,
-        stream: std.net.Stream,
+        stream: xev.TCP,
         address: std.net.Address,
+        manager_ctx: *anyopaque,
         authenticated: bool,
         auth_deadline_ns: i128,
         nonce: ?[crypto_mod.seed_length]u8,
@@ -35,6 +43,7 @@ pub const Session = struct {
             .id = id,
             .stream = stream,
             .address = address,
+            .manager_ctx = manager_ctx,
             .reader = protocol.Reader.init(allocator),
             .authenticated = authenticated,
             .auth_deadline_ns = auth_deadline_ns,
@@ -46,7 +55,7 @@ pub const Session = struct {
         self.reader.deinit();
         self.write_buffer.deinit(allocator);
         if (!self.closed) {
-            self.stream.close();
+            std.posix.close(self.stream.fd);
         }
         self.* = undefined;
     }

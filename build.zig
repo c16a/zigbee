@@ -6,6 +6,10 @@ pub fn build(b: *std.Build) void {
     // Default to a release-safe build so `zig build` produces optimized binaries
     // without needing `-Doptimize=...` on the command line.
     const optimize = .ReleaseSafe;
+    const xev = b.dependency("libxev", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const common_client = b.createModule(.{
         .root_source_file = b.path("src/common/client.zig"),
@@ -13,8 +17,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const cli_modules = makeCliModules(b, target, optimize, common_client);
-    const server_exe = makeExecutable(b, "zigbee", "src/server/main.zig", target, optimize, false);
+    const server_exe = makeExecutable(b, "zigbee", "src/server/main.zig", target, optimize, true);
     server_exe.root_module.addImport("common_client", common_client);
+    server_exe.root_module.addImport("xev", xev.module("xev"));
     const cli_main_module = b.createModule(.{
         .root_source_file = b.path("src/cli/main.zig"),
         .target = target,
@@ -56,6 +61,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     tests.root_module.addImport("common_client", common_client);
+    tests.root_module.addImport("xev", xev.module("xev"));
     server_exe.root_module.addImport("common_client", common_client);
     cli_main_module.addImport("common_client", common_client);
 
@@ -197,9 +203,14 @@ fn addCrossTarget(b: *std.Build, cross_step: *std.Build.Step, optimize: std.buil
         .target = resolved_target,
         .optimize = optimize,
     });
+    const xev = b.dependency("libxev", .{
+        .target = resolved_target,
+        .optimize = optimize,
+    });
     const needs_libc = true;
     const server_exe = makeExecutable(b, "zigbee", "src/server/main.zig", resolved_target, optimize, needs_libc);
     server_exe.root_module.addImport("common_client", common_client);
+    server_exe.root_module.addImport("xev", xev.module("xev"));
     const cli_modules = makeCliModules(b, resolved_target, optimize, common_client);
     const cli_main_module = b.createModule(.{
         .root_source_file = b.path("src/cli/main.zig"),
