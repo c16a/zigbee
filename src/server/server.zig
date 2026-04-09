@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 const std = @import("std");
 const broker_mod = @import("broker.zig");
+const cluster_mod = @import("cluster.zig");
 const auth_mod = @import("auth.zig");
 const config_mod = @import("config.zig");
 const common_mod = @import("common_client");
@@ -12,6 +13,7 @@ pub const Server = struct {
     allocator: std.mem.Allocator,
     broker: *broker_mod.Broker,
     auth: ?auth_mod.Store,
+    cluster: ?*cluster_mod.Cluster,
     verbose: bool,
     listener: std.net.Server,
     sessions_mutex: std.Thread.Mutex = .{},
@@ -20,11 +22,12 @@ pub const Server = struct {
     client_threads: std.ArrayList(std.Thread) = .empty,
     next_session_id: u64 = 1,
 
-    pub fn start(allocator: std.mem.Allocator, broker: *broker_mod.Broker, address: std.net.Address, auth_cfg: ?config_mod.Auth, verbose: bool) !Server {
+    pub fn start(allocator: std.mem.Allocator, broker: *broker_mod.Broker, address: std.net.Address, auth_cfg: ?config_mod.Auth, cluster_cfg: config_mod.Cluster, verbose: bool) !Server {
         var server = Server{
             .allocator = allocator,
             .broker = broker,
             .auth = null,
+            .cluster = null,
             .verbose = verbose,
             .listener = try address.listen(.{ .reuse_address = true }),
             .sessions = std.AutoHashMap(u64, *session.Session).init(allocator),
@@ -33,11 +36,26 @@ pub const Server = struct {
         if (auth_cfg) |cfg| {
             server.auth = try auth_mod.Store.initFromConfig(allocator, cfg);
         }
+        errdefer if (server.auth) |*auth| auth.deinit();
+        const cluster = try allocator.create(cluster_mod.Cluster);
+        errdefer allocator.destroy(cluster);
+        cluster.* = try cluster_mod.Cluster.init(allocator, cluster_cfg, &server, deliverClusterMessage);
+        server.cluster = cluster;
+        errdefer if (server.cluster) |cluster_ptr| {
+            cluster_ptr.deinit();
+            allocator.destroy(cluster_ptr);
+        };
+        try cluster.startThread();
         return server;
     }
 
     pub fn deinit(self: *Server) void {
         self.listener.deinit();
+
+        if (self.cluster) |cluster| {
+            cluster.deinit();
+            self.allocator.destroy(cluster);
+        }
 
         self.sessions_mutex.lock();
         for (self.all_sessions.items) |s| {
@@ -164,10 +182,22 @@ fn formatMsgHeader(buf: []u8, msg: protocol.OutgoingMessage) ![]const u8 {
     };
 }
 
+fn deliverClusterMessage(ctx: *anyopaque, delivery: cluster_mod.Delivery, subject: []const u8, reply: ?[]const u8, payload: []const u8) void {
+    const server: *Server = @ptrCast(@alignCast(ctx));
+    server.sendMsg(delivery.session_id, .{ .msg = .{
+        .session_id = delivery.session_id,
+        .sid = delivery.sid,
+        .subject = subject,
+        .reply = reply,
+        .payload = payload,
+    } });
+}
+
 fn clientMain(server: *Server, s: *session.Session) void {
     defer s.close();
     defer server.broker.unsubscribeSession(s.id);
     defer server.unregisterSession(s.id);
+    defer if (server.cluster) |cluster| cluster.unsubscribeSession(s.id) catch {};
 
     const auth_required = server.auth != null;
     var auth_done = std.atomic.Value(bool).init(false);
@@ -313,6 +343,12 @@ fn clientMain(server: *Server, s: *session.Session) void {
                             return;
                         }
                     }
+                    if (server.cluster) |cluster| {
+                        cluster.subscribe(s.id, sub.sid, sub.subject, sub.queue) catch |err| {
+                            server.sendErr(s.id, @errorName(err));
+                            return;
+                        };
+                    }
                     server.broker.subscribe(s.id, sub.sid, sub.subject, sub.queue) catch |err| {
                         server.sendErr(s.id, @errorName(err));
                         return;
@@ -324,6 +360,12 @@ fn clientMain(server: *Server, s: *session.Session) void {
                         server.sendErr(s.id, "auth required");
                         server.sendMsg(s.id, .close);
                         return;
+                    }
+                    if (server.cluster) |cluster| {
+                        cluster.unsubscribe(s.id, unsub.sid, unsub.max) catch |err| {
+                            server.sendErr(s.id, @errorName(err));
+                            return;
+                        };
                     }
                     server.broker.unsubscribe(s.id, unsub.sid, unsub.max);
                     server.sendOk(s.id);
@@ -344,14 +386,18 @@ fn clientMain(server: *Server, s: *session.Session) void {
                             return;
                         }
                     }
-                    const deliveries = server.broker.publish(publish.subject) catch |err| {
+                    const cluster = server.cluster orelse {
+                        server.sendErr(s.id, "cluster unavailable");
+                        return;
+                    };
+                    const deliveries = cluster.publish(publish.subject, publish.reply, publish.payload) catch |err| {
                         server.sendErr(s.id, @errorName(err));
                         return;
                     };
                     defer server.allocator.free(deliveries);
                     for (deliveries) |delivery| {
-                        server.sendMsg(delivery.client_id, .{ .msg = .{
-                            .session_id = delivery.client_id,
+                        server.sendMsg(delivery.session_id, .{ .msg = .{
+                            .session_id = delivery.session_id,
                             .sid = delivery.sid,
                             .subject = publish.subject,
                             .reply = publish.reply,

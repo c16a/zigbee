@@ -20,6 +20,45 @@ pub const Publish = struct {
     payload: []const u8,
 };
 
+pub const ClusterSubscription = struct {
+    session_id: u64,
+    sid: u64,
+    subject: []const u8,
+    queue: ?[]const u8 = null,
+    remaining: ?u64 = null,
+};
+
+pub const ClusterPeerSnapshot = struct {
+    peer_id: u64,
+    ip: []const u8,
+    port: u16,
+    subscriptions: []const ClusterSubscription = &.{},
+};
+
+pub const ClusterPublish = struct {
+    subject: []const u8,
+    reply: ?[]const u8 = null,
+    payload_b64: []const u8,
+};
+
+pub const ClusterPacket = struct {
+    kind: []const u8,
+    origin_id: u64,
+    seq: u64,
+    port: ?u16 = null,
+    subscription: ?ClusterSubscription = null,
+    unsubscribe_sid: ?u64 = null,
+    unsubscribe_max: ?u64 = null,
+    publish: ?ClusterPublish = null,
+    snapshot: ?[]const ClusterPeerSnapshot = null,
+    ack_origin_id: ?u64 = null,
+    ack_seq: ?u64 = null,
+};
+
+pub fn formatClusterPacketJson(allocator: std.mem.Allocator, packet: ClusterPacket) ![]u8 {
+    return try std.json.Stringify.valueAlloc(allocator, packet, .{});
+}
+
 pub const Info = struct {
     server_id: []const u8 = "zigbee",
     version: []const u8 = "0.1.0",

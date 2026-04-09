@@ -15,10 +15,17 @@ pub const Auth = struct {
     users: []const AuthUser = &.{},
 };
 
+pub const Cluster = struct {
+    bind_address: ?[]const u8 = null,
+    peer_addresses: []const []const u8 = &.{},
+    heartbeat_interval_ms: u32 = 5000,
+};
+
 pub const Config = struct {
     listen_address: ?[]const u8 = null,
     verbose: bool = true,
     auth: ?Auth = null,
+    cluster: Cluster = .{},
 };
 
 pub const LoadedConfig = struct {

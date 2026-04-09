@@ -10,6 +10,14 @@ If `zigbee.config.json` is absent, the server listens on `0.0.0.0:4222`.
 Verbose acknowledgements are enabled by default, so successful client commands
 receive an `OK` frame unless you explicitly disable verbose mode in config.
 
+Cluster behavior:
+
+- Configure `cluster.bind_address` as a full `host:port` UDP address for the local cluster socket.
+- Add `cluster.peer_addresses` to seed the cluster on startup. Each entry must be a full `host:port` UDP address.
+- Set `cluster.heartbeat_interval_ms` to control how often each node sends keepalive heartbeats to peers.
+- New peers are learned through UDP `HELLO` and `SNAPSHOT` traffic, and subscription changes are gossip-replicated cluster-wide.
+- Publishes are fanned out to local matching sessions and to the peer that owns each queue group.
+
 Connection rule:
 
 - If `auth` is not configured, clients may publish and subscribe immediately after TCP connect.
@@ -30,6 +38,11 @@ Example configuration:
 ```json
 {
   "listen_address": "0.0.0.0:4222",
+  "cluster": {
+    "bind_address": "127.0.0.1:4333",
+    "peer_addresses": ["10.0.0.2:4333", "10.0.0.3:4333"],
+    "heartbeat_interval_ms": 5000
+  },
   "auth": {
     "mode": "static_zkey",
     "users": [

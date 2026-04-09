@@ -13,7 +13,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const cli_modules = makeCliModules(b, target, optimize, common_client);
-    const server_exe = makeExecutable(b, "zigbee", "src/server/main.zig", target, optimize);
+    const server_exe = makeExecutable(b, "zigbee", "src/server/main.zig", target, optimize, false);
     server_exe.root_module.addImport("common_client", common_client);
     const cli_main_module = b.createModule(.{
         .root_source_file = b.path("src/cli/main.zig"),
@@ -130,13 +130,14 @@ pub fn build(b: *std.Build) void {
     });
 }
 
-fn makeExecutable(b: *std.Build, name: []const u8, root_source: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+fn makeExecutable(b: *std.Build, name: []const u8, root_source: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, link_libc: bool) *std.Build.Step.Compile {
     return b.addExecutable(.{
         .name = name,
         .root_module = b.createModule(.{
             .root_source_file = b.path(root_source),
             .target = target,
             .optimize = optimize,
+            .link_libc = link_libc,
         }),
     });
 }
@@ -208,13 +209,15 @@ fn addCrossTarget(b: *std.Build, cross_step: *std.Build.Step, optimize: std.buil
         .target = resolved_target,
         .optimize = optimize,
     });
-    const server_exe = makeExecutable(b, "zigbee", "src/server/main.zig", resolved_target, optimize);
+    const needs_libc = resolved_target.result.os.tag == .windows;
+    const server_exe = makeExecutable(b, "zigbee", "src/server/main.zig", resolved_target, optimize, needs_libc);
     server_exe.root_module.addImport("common_client", common_client);
     const cli_modules = makeCliModules(b, resolved_target, optimize, common_client);
     const cli_main_module = b.createModule(.{
         .root_source_file = b.path("src/cli/main.zig"),
         .target = resolved_target,
         .optimize = optimize,
+        .link_libc = needs_libc,
     });
     cli_main_module.addImport("cli_app", cli_modules.app);
     const cli_exe = b.addExecutable(.{
