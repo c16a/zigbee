@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 const std = @import("std");
-const protocol = @import("protocol.zig");
+const protocol = @import("common_client").protocol_mod;
 
 pub const Delivery = struct {
     client_id: u64,

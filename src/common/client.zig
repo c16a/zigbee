@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: MIT
 const std = @import("std");
 const builtin = @import("builtin");
-const crypto_mod = @import("crypto.zig");
-const protocol = @import("protocol.zig");
+const crypto_mod_impl = @import("crypto.zig");
+const protocol_mod_impl = @import("protocol.zig");
+
+pub const crypto_mod = crypto_mod_impl;
+pub const protocol_mod = protocol_mod_impl;
+const protocol = protocol_mod;
 
 pub const Message = struct {
     subject: []const u8,

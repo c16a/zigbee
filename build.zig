@@ -7,8 +7,24 @@ pub fn build(b: *std.Build) void {
     // without needing `-Doptimize=...` on the command line.
     const optimize = .ReleaseSafe;
 
-    const server_exe = makeExecutable(b, "zigbee", "src/main.zig", target, optimize);
-    const cli_exe = makeExecutable(b, "zigbee-cli", "src/cli.zig", target, optimize);
+    const common_client = b.createModule(.{
+        .root_source_file = b.path("src/common/client.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const cli_modules = makeCliModules(b, target, optimize, common_client);
+    const server_exe = makeExecutable(b, "zigbee", "src/server/main.zig", target, optimize);
+    server_exe.root_module.addImport("common_client", common_client);
+    const cli_main_module = b.createModule(.{
+        .root_source_file = b.path("src/cli/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cli_main_module.addImport("cli_app", cli_modules.app);
+    const cli_exe = b.addExecutable(.{
+        .name = "zigbee-cli",
+        .root_module = cli_main_module,
+    });
 
     b.installArtifact(server_exe);
     b.installArtifact(cli_exe);
@@ -39,18 +55,23 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    const cli_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/cli.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+    tests.root_module.addImport("common_client", common_client);
+    server_exe.root_module.addImport("common_client", common_client);
+    cli_main_module.addImport("common_client", common_client);
+
+    const cli_types_tests = b.addTest(.{
+        .root_module = cli_modules.types,
+    });
+    const cli_parse_tests = b.addTest(.{
+        .root_module = cli_modules.parse,
     });
     const run_tests = b.step("test", "Run tests");
     const run_server_tests = b.addRunArtifact(tests);
-    const run_cli_tests = b.addRunArtifact(cli_tests);
-    run_cli_tests.step.dependOn(&run_server_tests.step);
-    run_tests.dependOn(&run_cli_tests.step);
+    const run_cli_types_tests = b.addRunArtifact(cli_types_tests);
+    const run_cli_parse_tests = b.addRunArtifact(cli_parse_tests);
+    run_cli_types_tests.step.dependOn(&run_server_tests.step);
+    run_cli_parse_tests.step.dependOn(&run_cli_types_tests.step);
+    run_tests.dependOn(&run_cli_parse_tests.step);
 
     const cross_step = b.step("cross", "Build all cross targets");
     addCrossTarget(b, cross_step, optimize, .{
@@ -96,6 +117,55 @@ fn makeExecutable(b: *std.Build, name: []const u8, root_source: []const u8, targ
     });
 }
 
+const CliModules = struct {
+    app: *std.Build.Module,
+    types: *std.Build.Module,
+    parse: *std.Build.Module,
+    bench: *std.Build.Module,
+};
+
+fn makeCliModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, common_client: *std.Build.Module) CliModules {
+    const types = b.createModule(.{
+        .root_source_file = b.path("src/cli/types.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    types.addImport("common_client", common_client);
+
+    const parse = b.createModule(.{
+        .root_source_file = b.path("src/cli/parse.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    parse.addImport("common_client", common_client);
+    parse.addImport("cli_types", types);
+
+    const bench = b.createModule(.{
+        .root_source_file = b.path("src/cli/bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench.addImport("common_client", common_client);
+    bench.addImport("cli_types", types);
+
+    const app = b.createModule(.{
+        .root_source_file = b.path("src/cli/app.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    app.addImport("common_client", common_client);
+    app.addImport("cli_types", types);
+    app.addImport("cli_parse", parse);
+    app.addImport("cli_bench", bench);
+
+    return .{
+        .app = app,
+        .types = types,
+        .parse = parse,
+        .bench = bench,
+    };
+}
+
 const CrossTarget = struct {
     step_name: []const u8,
     description: []const u8,
@@ -109,8 +179,24 @@ fn addCrossTarget(b: *std.Build, cross_step: *std.Build.Step, optimize: std.buil
     }) catch @panic("invalid cross target");
     const resolved_target = b.resolveTargetQuery(target_query);
 
-    const server_exe = makeExecutable(b, "zigbee", "src/main.zig", resolved_target, optimize);
-    const cli_exe = makeExecutable(b, "zigbee-cli", "src/cli.zig", resolved_target, optimize);
+    const common_client = b.createModule(.{
+        .root_source_file = b.path("src/common/client.zig"),
+        .target = resolved_target,
+        .optimize = optimize,
+    });
+    const server_exe = makeExecutable(b, "zigbee", "src/server/main.zig", resolved_target, optimize);
+    server_exe.root_module.addImport("common_client", common_client);
+    const cli_modules = makeCliModules(b, resolved_target, optimize, common_client);
+    const cli_main_module = b.createModule(.{
+        .root_source_file = b.path("src/cli/main.zig"),
+        .target = resolved_target,
+        .optimize = optimize,
+    });
+    cli_main_module.addImport("cli_app", cli_modules.app);
+    const cli_exe = b.addExecutable(.{
+        .name = "zigbee-cli",
+        .root_module = cli_main_module,
+    });
 
     const server_install = b.addInstallArtifact(server_exe, .{
         .dest_sub_path = b.fmt("{s}/{s}", .{ spec.output_dir, server_exe.out_filename }),

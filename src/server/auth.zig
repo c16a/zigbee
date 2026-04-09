@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 const std = @import("std");
 const config_mod = @import("config.zig");
-const crypto_mod = @import("crypto.zig");
-const protocol_mod = @import("protocol.zig");
+const common_mod = @import("common_client");
+const crypto_mod = common_mod.crypto_mod;
+const protocol_mod = common_mod.protocol_mod;
 
 pub const Permissions = struct {
     allow_publish: []const []const u8,
