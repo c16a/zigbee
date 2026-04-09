@@ -21,9 +21,13 @@ pub const Server = struct {
     all_sessions: std.ArrayList(*session.Session) = .empty,
     client_threads: std.ArrayList(std.Thread) = .empty,
     next_session_id: u64 = 1,
+    cluster_delivery_count: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
-    pub fn start(allocator: std.mem.Allocator, broker: *broker_mod.Broker, address: std.net.Address, auth_cfg: ?config_mod.Auth, cluster_cfg: config_mod.Cluster, verbose: bool) !Server {
-        var server = Server{
+    pub fn start(allocator: std.mem.Allocator, broker: *broker_mod.Broker, address: std.net.Address, auth_cfg: ?config_mod.Auth, cluster_cfg: config_mod.Cluster, verbose: bool) !*Server {
+        const server = try allocator.create(Server);
+        errdefer allocator.destroy(server);
+
+        server.* = .{
             .allocator = allocator,
             .broker = broker,
             .auth = null,
@@ -39,7 +43,7 @@ pub const Server = struct {
         errdefer if (server.auth) |*auth| auth.deinit();
         const cluster = try allocator.create(cluster_mod.Cluster);
         errdefer allocator.destroy(cluster);
-        cluster.* = try cluster_mod.Cluster.init(allocator, cluster_cfg, &server, deliverClusterMessage);
+        cluster.* = try cluster_mod.Cluster.init(allocator, cluster_cfg, @ptrCast(server), deliverClusterMessage);
         server.cluster = cluster;
         errdefer if (server.cluster) |cluster_ptr| {
             cluster_ptr.deinit();
@@ -97,6 +101,10 @@ pub const Server = struct {
                 return err;
             };
         }
+    }
+
+    pub fn clusterDeliveryCount(self: *Server) u64 {
+        return self.cluster_delivery_count.load(.acquire);
     }
 
     fn makeSession(self: *Server, stream: std.net.Stream) !*session.Session {
@@ -184,6 +192,7 @@ fn formatMsgHeader(buf: []u8, msg: protocol.OutgoingMessage) ![]const u8 {
 
 fn deliverClusterMessage(ctx: *anyopaque, delivery: cluster_mod.Delivery, subject: []const u8, reply: ?[]const u8, payload: []const u8) void {
     const server: *Server = @ptrCast(@alignCast(ctx));
+    _ = server.cluster_delivery_count.fetchAdd(1, .acq_rel);
     server.sendMsg(delivery.session_id, .{ .msg = .{
         .session_id = delivery.session_id,
         .sid = delivery.sid,

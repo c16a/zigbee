@@ -250,6 +250,17 @@ pub const Cluster = struct {
         return local;
     }
 
+    pub fn debugRemoteSubscriptionCount(self: *Cluster) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        var total: usize = 0;
+        for (self.remote_peers.items) |peer| {
+            total += peer.subscriptions.items.len;
+        }
+        return total;
+    }
+
     fn runThread(self: *Cluster) void {
         var scratch: [65535]u8 = undefined;
 
@@ -279,11 +290,10 @@ pub const Cluster = struct {
     }
 
     fn handlePacket(self: *Cluster, source: std.net.Address, bytes: []const u8) !void {
-        const parsed = try std.json.parseFromSlice(protocol.ClusterPacket, self.allocator, bytes, .{
+        const parsed = try std.json.parseFromSlice(protocol.ClusterPacket, std.heap.page_allocator, bytes, .{
             .allocate = .alloc_always,
             .ignore_unknown_fields = true,
         });
-        defer parsed.deinit();
 
         const packet = parsed.value;
 
@@ -331,13 +341,9 @@ pub const Cluster = struct {
 
                 var local = try self.collectLocalDeliveriesLocked(publish_msg.subject);
                 defer local.deinit(self.allocator);
-
-                const local_slice = try local.toOwnedSlice(self.allocator);
-                errdefer self.allocator.free(local_slice);
                 self.mutex.unlock();
                 defer self.mutex.lock();
-                self.deliverLocal(local_slice, publish_msg.subject, publish_msg.reply, payload);
-                self.allocator.free(local_slice);
+                self.deliverLocal(local.items, publish_msg.subject, publish_msg.reply, payload);
             }
         } else if (std.mem.eql(u8, packet.kind, "heartbeat")) {
             // Keepalive only.
@@ -357,6 +363,7 @@ pub const Cluster = struct {
     fn collectRouteLocked(self: *Cluster, subject: []const u8) !Route {
         var route: Route = .{};
         try self.collectLocalDirectLocked(&route, subject);
+        try self.collectRemoteDirectLocked(&route, subject);
         try self.collectQueueRouteLocked(&route, subject);
         return route;
     }
@@ -381,6 +388,17 @@ pub const Cluster = struct {
                     self.removeLocalAtLocked(index);
                     index -= 1;
                 }
+            }
+        }
+    }
+
+    fn collectRemoteDirectLocked(self: *Cluster, route: *Route, subject: []const u8) !void {
+        for (self.remote_peers.items) |*peer| {
+            for (peer.subscriptions.items) |sub| {
+                if (sub.queue != null) continue;
+                if (!protocol.matchesSubject(sub.subject, subject)) continue;
+                try appendUniqueU64(self.allocator, &route.remote_peer_ids, peer.peer_id);
+                break;
             }
         }
     }
@@ -638,13 +656,15 @@ pub const Cluster = struct {
                 .attempts = 1,
             });
             const pending_index = self.pending_packets.items.len - 1;
-            if (posix.sendto(self.socket_fd, bytes, 0, &dest.any, dest.getOsSockLen())) |_| {
-                self.pending_packets.items[pending_index].next_retry_ns = now + retryDelayNs(1);
-            } else |err| {
-                self.allocator.free(bytes);
-                _ = self.pending_packets.swapRemove(pending_index);
-                return err;
-            }
+            _ = std.c.sendto(
+                self.socket_fd,
+                bytes.ptr,
+                bytes.len,
+                0,
+                @ptrCast(&dest.any),
+                dest.getOsSockLen(),
+            );
+            self.pending_packets.items[pending_index].next_retry_ns = now + retryDelayNs(1);
         }
     }
 
@@ -658,15 +678,17 @@ pub const Cluster = struct {
             }
 
             const delay = retryDelayNs(pending.attempts);
-            if (posix.sendto(self.socket_fd, pending.bytes, 0, &pending.dest.any, pending.dest.getOsSockLen())) |_| {
-                pending.next_retry_ns = now + delay;
-                pending.attempts += 1;
-                index += 1;
-            } else |_| {
-                pending.next_retry_ns = now + delay;
-                pending.attempts += 1;
-                index += 1;
-            }
+            _ = std.c.sendto(
+                self.socket_fd,
+                pending.bytes.ptr,
+                pending.bytes.len,
+                0,
+                @ptrCast(&pending.dest.any),
+                pending.dest.getOsSockLen(),
+            );
+            pending.next_retry_ns = now + delay;
+            pending.attempts += 1;
+            index += 1;
         }
     }
 
@@ -693,7 +715,14 @@ pub const Cluster = struct {
             .ack_seq = seq,
         });
         defer self.allocator.free(packet);
-        _ = try posix.sendto(self.socket_fd, packet, 0, &dest.any, dest.getOsSockLen());
+        _ = std.c.sendto(
+            self.socket_fd,
+            packet.ptr,
+            packet.len,
+            0,
+            @ptrCast(&dest.any),
+            dest.getOsSockLen(),
+        );
     }
 
     fn isDuplicateLocked(self: *Cluster, origin_id: u64, seq: u64) bool {
