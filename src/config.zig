@@ -17,6 +17,7 @@ pub const Auth = struct {
 
 pub const Config = struct {
     listen_address: ?[]const u8 = null,
+    verbose: bool = true,
     auth: ?Auth = null,
 };
 

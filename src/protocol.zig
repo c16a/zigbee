@@ -56,7 +56,9 @@ pub const OutgoingMessage = struct {
 
 pub const OutgoingFrame = union(enum) {
     info: Info,
+    ok,
     pong,
+    close,
     msg: OutgoingMessage,
 };
 
@@ -78,6 +80,7 @@ pub const ClientVerb = enum {
     request,
     reply,
     ping,
+    session,
 };
 
 pub const client_verbs = [_]ClientVerb{
@@ -87,6 +90,7 @@ pub const client_verbs = [_]ClientVerb{
     .request,
     .reply,
     .ping,
+    .session,
 };
 
 pub fn parseClientVerb(text: []const u8) ?ClientVerb {
@@ -96,6 +100,7 @@ pub fn parseClientVerb(text: []const u8) ?ClientVerb {
     if (std.mem.eql(u8, text, "request")) return .request;
     if (std.mem.eql(u8, text, "reply")) return .reply;
     if (std.mem.eql(u8, text, "ping")) return .ping;
+    if (std.mem.eql(u8, text, "session")) return .session;
     return null;
 }
 
@@ -107,6 +112,7 @@ pub fn clientVerbName(verb: ClientVerb) []const u8 {
         .request => "request",
         .reply => "reply",
         .ping => "ping",
+        .session => "session",
     };
 }
 
@@ -151,6 +157,10 @@ pub const ClientPing = struct {
     count: u64 = 1,
 };
 
+pub const ClientSession = struct {
+    server: []const u8 = default_client_server,
+};
+
 pub const ClientCommand = union(enum) {
     publish: ClientPublish,
     subscribe: ClientSubscribe,
@@ -158,6 +168,7 @@ pub const ClientCommand = union(enum) {
     request: ClientRequest,
     reply: ClientReply,
     ping: ClientPing,
+    session: ClientSession,
 };
 
 const PendingPublish = struct {

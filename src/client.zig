@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 const std = @import("std");
+const builtin = @import("builtin");
 const crypto_mod = @import("crypto.zig");
 const protocol = @import("protocol.zig");
 
@@ -12,7 +13,9 @@ pub const Message = struct {
 
 pub const Frame = union(enum) {
     info: []const u8,
+    ok,
     pong,
+    close,
     err: []const u8,
     msg: Message,
 };
@@ -87,7 +90,9 @@ pub const FrameReader = struct {
                 return .{ .info = trimLeft(line["INFO".len..]) };
             }
 
+            if (std.mem.eql(u8, line, "OK")) return .ok;
             if (std.mem.eql(u8, line, "PONG")) return .pong;
+            if (std.mem.eql(u8, line, "CLOSE")) return .close;
 
             if (std.mem.startsWith(u8, line, "-ERR")) {
                 return .{ .err = trimLeft(line["-ERR".len..]) };
@@ -223,7 +228,9 @@ pub const Client = struct {
             const frame = try self.nextFrame() orelse return error.UnexpectedEndOfStream;
             switch (frame) {
                 .pong => return,
+                .close => return error.ServerClosed,
                 .err => |_| return error.InvalidServerResponse,
+                .ok => continue,
                 else => continue,
             }
         }
@@ -234,7 +241,9 @@ pub const Client = struct {
             const frame = try self.nextFrame() orelse return null;
             switch (frame) {
                 .msg => |msg| return msg,
+                .close => return error.ServerClosed,
                 .err => return error.InvalidServerResponse,
+                .ok => continue,
                 else => continue,
             }
         }
@@ -258,6 +267,85 @@ pub const Client = struct {
         try self.stream.writeAll("\r\n");
     }
 };
+
+pub fn runSession(allocator: std.mem.Allocator, address: std.net.Address, auth: ?Auth) !void {
+    if (builtin.os.tag == .windows) return error.UnsupportedPlatform;
+
+    const stream = try std.net.tcpConnectToAddress(address);
+    var client = Client{
+        .allocator = allocator,
+        .stream = stream,
+        .reader = FrameReader.init(allocator),
+    };
+    defer client.deinit();
+
+    const stdin = std.fs.File.stdin();
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    var stdin_reader = stdin.deprecatedReader();
+    var frame_reader = &client.reader;
+    var scratch: [4096]u8 = undefined;
+    const max_line = 64 * 1024;
+
+    while (true) {
+        const frame = try client.nextFrame() orelse return error.UnexpectedEndOfStream;
+        switch (frame) {
+            .info => |info_json| {
+                try printFrame(stdout, frame);
+                const info = try parseInfo(allocator, info_json);
+                defer info.deinit();
+
+                if (info.value.auth_required and auth != null) {
+                    try sendConnect(&client, info.value, auth);
+                } else {
+                    const connect_json = try protocol.formatConnectJson(client.allocator, .{ .auth_mode = "none" });
+                    defer client.allocator.free(connect_json);
+                    try client.writeLine(&[_][]const u8{ "CONNECT ", connect_json });
+                }
+                break;
+            },
+            .close => {
+                try printFrame(stdout, frame);
+                return;
+            },
+            else => {
+                try printFrame(stdout, frame);
+                continue;
+            },
+        }
+    }
+
+    while (true) {
+        var fds = [_]std.posix.pollfd{
+            .{ .fd = stdin.handle, .events = std.posix.POLL.IN, .revents = 0 },
+            .{ .fd = client.stream.handle, .events = std.posix.POLL.IN, .revents = 0 },
+        };
+
+        _ = try std.posix.poll(&fds, -1);
+
+        if ((fds[1].revents & std.posix.POLL.IN) != 0) {
+            const read_len = try client.stream.read(&scratch);
+            if (read_len == 0) return;
+            try frame_reader.feed(scratch[0..read_len]);
+            while (try frame_reader.next()) |frame| {
+                switch (frame) {
+                    .close => {
+                        try stdout.writeAll("CLOSE\r\n");
+                        return;
+                    },
+                    .ok => try stdout.writeAll("OK\r\n"),
+                    else => try printFrame(stdout, frame),
+                }
+            }
+        }
+
+        if ((fds[0].revents & std.posix.POLL.IN) != 0) {
+            const line = try stdin_reader.readUntilDelimiterOrEofAlloc(allocator, '\n', max_line) orelse return;
+            defer allocator.free(line);
+            const trimmed = std.mem.trimRight(u8, line, "\r");
+            try client.writeLine(&[_][]const u8{trimmed});
+        }
+    }
+}
 
 pub fn loadAuthFromSeedFile(allocator: std.mem.Allocator, path: []const u8) !Auth {
     const contents = try std.fs.cwd().readFileAlloc(allocator, path, 16 * 1024);
@@ -328,4 +416,23 @@ fn sendConnect(client: *Client, info: protocol.Info, auth: ?Auth) !void {
     const connect_json = try protocol.formatConnectJson(client.allocator, .{ .auth_mode = "none" });
     defer client.allocator.free(connect_json);
     try client.writeLine(&[_][]const u8{ "CONNECT ", connect_json });
+}
+
+fn printFrame(writer: anytype, frame: Frame) !void {
+    switch (frame) {
+        .info => |info_json| try writer.print("INFO {s}\r\n", .{info_json}),
+        .ok => try writer.writeAll("OK\r\n"),
+        .pong => try writer.writeAll("PONG\r\n"),
+        .close => try writer.writeAll("CLOSE\r\n"),
+        .err => |msg| try writer.print("-ERR '{s}'\r\n", .{msg}),
+        .msg => |msg| {
+            if (msg.reply) |reply_to| {
+                try writer.print("MSG {s} {d} {s} {d}\r\n", .{ msg.subject, msg.sid, reply_to, msg.payload.len });
+            } else {
+                try writer.print("MSG {s} {d} {d}\r\n", .{ msg.subject, msg.sid, msg.payload.len });
+            }
+            try writer.writeAll(msg.payload);
+            try writer.writeAll("\r\n");
+        },
+    }
 }

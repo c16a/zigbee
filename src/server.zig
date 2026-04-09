@@ -11,6 +11,7 @@ pub const Server = struct {
     allocator: std.mem.Allocator,
     broker: *broker_mod.Broker,
     auth: ?auth_mod.Store,
+    verbose: bool,
     listener: std.net.Server,
     sessions_mutex: std.Thread.Mutex = .{},
     sessions: std.AutoHashMap(u64, *session.Session),
@@ -18,11 +19,12 @@ pub const Server = struct {
     client_threads: std.ArrayList(std.Thread) = .empty,
     next_session_id: u64 = 1,
 
-    pub fn start(allocator: std.mem.Allocator, broker: *broker_mod.Broker, address: std.net.Address, auth_cfg: ?config_mod.Auth) !Server {
+    pub fn start(allocator: std.mem.Allocator, broker: *broker_mod.Broker, address: std.net.Address, auth_cfg: ?config_mod.Auth, verbose: bool) !Server {
         var server = Server{
             .allocator = allocator,
             .broker = broker,
             .auth = null,
+            .verbose = verbose,
             .listener = try address.listen(.{ .reuse_address = true }),
             .sessions = std.AutoHashMap(u64, *session.Session).init(allocator),
         };
@@ -123,12 +125,18 @@ pub const Server = struct {
                 defer self.allocator.free(json);
                 self.writeSessionFrame(session_id, &[_][]const u8{ "INFO ", json, "\r\n" });
             },
+            .ok => self.writeSessionFrame(session_id, &[_][]const u8{"OK\r\n"}),
             .pong => self.writeSessionFrame(session_id, &[_][]const u8{"PONG\r\n"}),
+            .close => self.writeSessionFrame(session_id, &[_][]const u8{"CLOSE\r\n"}),
             .msg => |msg| {
                 const header = formatMsgHeader(&buf, msg) catch return;
                 self.writeSessionFrame(msg.session_id, &[_][]const u8{ header, msg.payload, "\r\n" });
             },
         }
+    }
+
+    fn sendOk(self: *Server, session_id: u64) void {
+        if (self.verbose) self.sendMsg(session_id, .ok);
     }
 
     fn writeSessionFrame(self: *Server, session_id: u64, parts: []const []const u8) void {
@@ -210,6 +218,7 @@ fn clientMain(server: *Server, s: *session.Session) void {
                 .connect => |connect_json| {
                     if (saw_connect) {
                         server.sendErr(s.id, "duplicate CONNECT");
+                        server.sendMsg(s.id, .close);
                         return;
                     }
                     saw_connect = true;
@@ -219,6 +228,7 @@ fn clientMain(server: *Server, s: *session.Session) void {
                         .ignore_unknown_fields = true,
                     }) catch {
                         server.sendErr(s.id, "auth failed");
+                        server.sendMsg(s.id, .close);
                         return;
                     };
                     defer parsed.deinit();
@@ -226,57 +236,70 @@ fn clientMain(server: *Server, s: *session.Session) void {
                     if (auth_required) {
                         if (!std.mem.eql(u8, parsed.value.auth_mode, "zkey")) {
                             server.sendErr(s.id, "auth failed");
+                            server.sendMsg(s.id, .close);
                             return;
                         }
 
                         const store = server.auth.?;
                         const public_key_text = parsed.value.public_key orelse {
                             server.sendErr(s.id, "auth failed");
+                            server.sendMsg(s.id, .close);
                             return;
                         };
                         const signature_text = parsed.value.signature orelse {
                             server.sendErr(s.id, "auth failed");
+                            server.sendMsg(s.id, .close);
                             return;
                         };
 
                         const public_key = auth_mod.decodePublicKey(public_key_text) catch {
                             server.sendErr(s.id, "invalid public key");
+                            server.sendMsg(s.id, .close);
                             return;
                         };
                         const signature = auth_mod.decodeSignature(signature_text) catch {
                             server.sendErr(s.id, "invalid signature");
+                            server.sendMsg(s.id, .close);
                             return;
                         };
 
                         principal = store.lookupByPublicKey(public_key.bytes) orelse {
                             server.sendErr(s.id, "unknown key");
+                            server.sendMsg(s.id, .close);
                             return;
                         };
                         if (!auth_mod.verifyNonceSignature(public_key, nonce[0..], signature)) {
                             server.sendErr(s.id, "invalid signature");
+                            server.sendMsg(s.id, .close);
                             return;
                         }
                     }
 
                     authenticated = true;
                     auth_done.store(true, .release);
+                    server.sendOk(s.id);
                 },
                 .ping => {
                     if (!authenticated) {
                         server.sendErr(s.id, "auth required");
+                        if (auth_required) server.sendMsg(s.id, .close);
                         return;
                     }
                     server.sendMsg(s.id, .pong);
+                    server.sendOk(s.id);
                 },
                 .pong => {
                     if (!authenticated) {
                         server.sendErr(s.id, "auth required");
+                        if (auth_required) server.sendMsg(s.id, .close);
                         return;
                     }
+                    server.sendOk(s.id);
                 },
                 .sub => |sub| {
                     if (auth_required and !authenticated) {
                         server.sendErr(s.id, "auth required");
+                        server.sendMsg(s.id, .close);
                         return;
                     }
                     if (server.auth) |_| {
@@ -293,17 +316,21 @@ fn clientMain(server: *Server, s: *session.Session) void {
                         server.sendErr(s.id, @errorName(err));
                         return;
                     };
+                    server.sendOk(s.id);
                 },
                 .unsub => |unsub| {
                     if (auth_required and !authenticated) {
                         server.sendErr(s.id, "auth required");
+                        server.sendMsg(s.id, .close);
                         return;
                     }
                     server.broker.unsubscribe(s.id, unsub.sid, unsub.max);
+                    server.sendOk(s.id);
                 },
                 .publish => |publish| {
                     if (auth_required and !authenticated) {
                         server.sendErr(s.id, "auth required");
+                        server.sendMsg(s.id, .close);
                         return;
                     }
                     if (server.auth) |_| {
@@ -330,6 +357,7 @@ fn clientMain(server: *Server, s: *session.Session) void {
                             .payload = publish.payload,
                         } });
                     }
+                    server.sendOk(s.id);
                 },
             }
         }
@@ -349,5 +377,6 @@ fn authDeadlineWatcher(server: *Server, s: *session.Session, session_id: u64, do
 
     if (done.load(.acquire)) return;
     server.sendErr(session_id, "auth timeout");
+    server.sendMsg(session_id, .close);
     s.close();
 }
