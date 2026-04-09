@@ -116,14 +116,14 @@ pub const FrameReader = struct {
                         .subject = subject,
                         .sid = try parseU64(sid_text),
                         .reply = third,
-                        .size = try parseU64(size_text),
+                        .size = try parseUsize(size_text),
                     };
                 } else {
                     self.pending_message = .{
                         .subject = subject,
                         .sid = try parseU64(sid_text),
                         .reply = null,
-                        .size = try parseU64(third),
+                        .size = try parseUsize(third),
                     };
                 }
                 continue;
@@ -366,7 +366,7 @@ pub fn makeInbox(allocator: std.mem.Allocator, prefix: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "_INBOX.{s}.{d}.{d}", .{ prefix, now, count });
 }
 
-var inbox_counter = std.atomic.Value(u64).init(1);
+var inbox_counter = std.atomic.Value(u32).init(1);
 
 pub fn parseServerAddress(text: []const u8) !std.net.Address {
     const index = std.mem.lastIndexOfScalar(u8, text, ':') orelse return error.InvalidServerAddress;
@@ -378,6 +378,10 @@ pub fn parseServerAddress(text: []const u8) !std.net.Address {
 
 fn parseU64(text: []const u8) !u64 {
     return std.fmt.parseInt(u64, text, 10) catch error.InvalidNumber;
+}
+
+fn parseUsize(text: []const u8) !usize {
+    return std.fmt.parseInt(usize, text, 10) catch error.InvalidNumber;
 }
 
 fn trimLeft(text: []const u8) []const u8 {

@@ -87,6 +87,30 @@ pub fn build(b: *std.Build) void {
         .output_dir = "linux-arm64",
     });
     addCrossTarget(b, cross_step, optimize, .{
+        .step_name = "linux-arm32",
+        .description = "Build Linux ARM32",
+        .target_triple = "arm-linux-musleabihf",
+        .output_dir = "linux-arm32",
+    });
+    addCrossTarget(b, cross_step, optimize, .{
+        .step_name = "linux-riscv64",
+        .description = "Build Linux RISCV64",
+        .target_triple = "riscv64-linux-musl",
+        .output_dir = "linux-riscv64",
+    });
+    addCrossTarget(b, cross_step, optimize, .{
+        .step_name = "linux-ppc64",
+        .description = "Build Linux PowerPC64",
+        .target_triple = "powerpc64le-linux-musl",
+        .output_dir = "linux-ppc64",
+    });
+    addCrossTarget(b, cross_step, optimize, .{
+        .step_name = "linux-s390x",
+        .description = "Build Linux s390x",
+        .target_triple = "s390x-linux-musl",
+        .output_dir = "linux-s390x",
+    });
+    addCrossTarget(b, cross_step, optimize, .{
         .step_name = "macos-arm64",
         .description = "Build macOS ARM64",
         .target_triple = "aarch64-macos-none",

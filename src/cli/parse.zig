@@ -170,7 +170,7 @@ fn parseSubscribe(allocator: std.mem.Allocator, cursor: *ArgCursor) !protocol_mo
             continue;
         }
         if (std.mem.eql(u8, arg, "--count")) {
-            cmd.count = try parseU64(try takeValue(cursor, "--count"));
+            cmd.count = try std.fmt.parseInt(usize, try takeValue(cursor, "--count"), 10);
             continue;
         }
         try positionals.append(allocator, arg);
@@ -244,7 +244,7 @@ fn parseReply(allocator: std.mem.Allocator, cursor: *ArgCursor) !protocol_mod.Cl
             continue;
         }
         if (std.mem.eql(u8, arg, "--count")) {
-            cmd.count = try parseU64(try takeValue(cursor, "--count"));
+            cmd.count = try std.fmt.parseInt(usize, try takeValue(cursor, "--count"), 10);
             continue;
         }
         try positionals.append(allocator, arg);
@@ -264,7 +264,7 @@ fn parsePing(cursor: *ArgCursor) !protocol_mod.ClientPing {
             continue;
         }
         if (std.mem.eql(u8, arg, "--count")) {
-            cmd.count = try parseU64(try takeValue(cursor, "--count"));
+            cmd.count = try std.fmt.parseInt(usize, try takeValue(cursor, "--count"), 10);
             continue;
         }
         return error.UnexpectedArgument;
@@ -306,7 +306,7 @@ fn parseBenchCommon(allocator: std.mem.Allocator, cursor: *ArgCursor, positional
             continue;
         }
         if (std.mem.eql(u8, arg, "--msgs")) {
-            cmd.msgs = try parseU64(try takeValue(cursor, "--msgs"));
+            cmd.msgs = try std.fmt.parseInt(usize, try takeValue(cursor, "--msgs"), 10);
             continue;
         }
         if (std.mem.eql(u8, arg, "--size")) {
@@ -326,7 +326,7 @@ fn parseBenchCommon(allocator: std.mem.Allocator, cursor: *ArgCursor, positional
             continue;
         }
         if (std.mem.eql(u8, arg, "--multi-subject-max")) {
-            cmd.multi_subject_max = try parseU64(try takeValue(cursor, "--multi-subject-max"));
+            cmd.multi_subject_max = try std.fmt.parseInt(usize, try takeValue(cursor, "--multi-subject-max"), 10);
             continue;
         }
         if (std.mem.eql(u8, arg, "--queue")) {
@@ -451,6 +451,6 @@ test "parse bench request command" {
     try std.testing.expect(parsed.command == .bench);
     try std.testing.expect(parsed.command.bench == .request);
     try std.testing.expectEqual(@as(usize, 4), parsed.command.bench.request.common.clients);
-    try std.testing.expectEqual(@as(u64, 1000), parsed.command.bench.request.common.msgs);
+    try std.testing.expectEqual(@as(usize, 1000), parsed.command.bench.request.common.msgs);
     try std.testing.expectEqualStrings("foo", parsed.command.bench.request.subject);
 }

@@ -45,7 +45,7 @@ fn runBenchPublish(allocator: std.mem.Allocator, bench: types.BenchPublish, auth
         threads[index] = try std.Thread.spawn(.{}, benchPublishWorker, .{&contexts[index]});
     }
 
-    waitForGate(&gate, @intCast(client_count));
+    waitForGate(&gate, client_count);
     const start = std.time.nanoTimestamp();
     gate.go.store(true, .release);
 
@@ -65,14 +65,14 @@ const PubWorker = struct {
     auth: ?client_mod.Auth,
     subject: []const u8,
     payload: []const u8,
-    messages: u64,
+    messages: usize,
     sleep_ns: u64,
     multi_subject: bool,
-    multi_subject_max: u64,
+    multi_subject_max: usize,
     gate: *types.StartGate,
     no_progress: bool,
-    messages_done: u64,
-    bytes_done: u64,
+    messages_done: usize,
+    bytes_done: usize,
 };
 
 fn benchPublishWorker(ctx: *PubWorker) void {
@@ -82,7 +82,7 @@ fn benchPublishWorker(ctx: *PubWorker) void {
     waitForGo(ctx.gate);
 
     var subject_buf: [256]u8 = undefined;
-    var i: u64 = 0;
+    var i: usize = 0;
     while (i < ctx.messages) : (i += 1) {
         const subject = if (ctx.multi_subject) blk: {
             const suffix = i % ctx.multi_subject_max;
@@ -120,7 +120,7 @@ fn runBenchSubscribe(allocator: std.mem.Allocator, bench: types.BenchSubscribe, 
         threads[index] = try std.Thread.spawn(.{}, benchSubscribeWorker, .{&contexts[index]});
     }
 
-    waitForGate(&gate, @intCast(client_count));
+    waitForGate(&gate, client_count);
     const start = std.time.nanoTimestamp();
     gate.go.store(true, .release);
 
@@ -139,12 +139,12 @@ const SubWorker = struct {
     server: []const u8,
     auth: ?client_mod.Auth,
     subject: []const u8,
-    messages: u64,
+    messages: usize,
     sleep_ns: u64,
     gate: *types.StartGate,
     no_progress: bool,
-    messages_done: u64,
-    bytes_done: u64,
+    messages_done: usize,
+    bytes_done: usize,
 };
 
 fn benchSubscribeWorker(ctx: *SubWorker) void {
@@ -154,7 +154,7 @@ fn benchSubscribeWorker(ctx: *SubWorker) void {
     signalReady(ctx.gate);
     waitForGo(ctx.gate);
 
-    var seen: u64 = 0;
+    var seen: usize = 0;
     while (seen < ctx.messages) {
         const maybe_msg = client.nextMessage() catch |err| fatal(err);
         const msg = maybe_msg orelse fatal(error.UnexpectedEndOfStream);
@@ -195,7 +195,7 @@ fn runBenchRequest(allocator: std.mem.Allocator, bench: types.BenchRequest, auth
         threads[index] = try std.Thread.spawn(.{}, benchRequestWorker, .{&contexts[index]});
     }
 
-    waitForGate(&gate, @intCast(client_count));
+    waitForGate(&gate, client_count);
     const start = std.time.nanoTimestamp();
     gate.go.store(true, .release);
 
@@ -215,11 +215,11 @@ const RequestWorker = struct {
     auth: ?client_mod.Auth,
     subject: []const u8,
     payload: []const u8,
-    messages: u64,
+    messages: usize,
     sleep_ns: u64,
     gate: *types.StartGate,
-    messages_done: u64,
-    bytes_done: u64,
+    messages_done: usize,
+    bytes_done: usize,
 };
 
 fn benchRequestWorker(ctx: *RequestWorker) void {
@@ -231,7 +231,7 @@ fn benchRequestWorker(ctx: *RequestWorker) void {
     signalReady(ctx.gate);
     waitForGo(ctx.gate);
 
-    var i: u64 = 0;
+    var i: usize = 0;
     while (i < ctx.messages) : (i += 1) {
         tryOrFatal(client.publish(ctx.subject, inbox, ctx.payload));
         _ = client.waitForMessage(inbox) catch |err| fatal(err);
@@ -271,7 +271,7 @@ fn runBenchReply(allocator: std.mem.Allocator, bench: types.BenchReply, auth: ?c
         threads[index] = try std.Thread.spawn(.{}, benchReplyWorker, .{&contexts[index]});
     }
 
-    waitForGate(&gate, @intCast(client_count));
+    waitForGate(&gate, client_count);
     const start = std.time.nanoTimestamp();
     gate.go.store(true, .release);
 
@@ -292,11 +292,11 @@ const ReplyWorker = struct {
     subject: []const u8,
     queue: []const u8,
     payload: []const u8,
-    messages: u64,
+    messages: usize,
     sleep_ns: u64,
     gate: *types.StartGate,
-    messages_done: u64,
-    bytes_done: u64,
+    messages_done: usize,
+    bytes_done: usize,
 };
 
 fn benchReplyWorker(ctx: *ReplyWorker) void {
@@ -306,7 +306,7 @@ fn benchReplyWorker(ctx: *ReplyWorker) void {
     signalReady(ctx.gate);
     waitForGo(ctx.gate);
 
-    var seen: u64 = 0;
+    var seen: usize = 0;
     while (seen < ctx.messages) {
         const maybe_msg = client.nextMessage() catch |err| fatal(err);
         const msg = maybe_msg orelse fatal(error.UnexpectedEndOfStream);
@@ -360,10 +360,10 @@ const LatencyWorker = struct {
     allocator: std.mem.Allocator,
     server: []const u8,
     auth: ?client_mod.Auth,
-    messages: u64,
+    messages: usize,
     sleep_ns: u64,
     gate: *types.StartGate,
-    messages_done: u64,
+    messages_done: usize,
 };
 
 fn benchLatencyWorker(ctx: *LatencyWorker) void {
@@ -372,7 +372,7 @@ fn benchLatencyWorker(ctx: *LatencyWorker) void {
     signalReady(ctx.gate);
     waitForGo(ctx.gate);
 
-    var seen: u64 = 0;
+    var seen: usize = 0;
     while (seen < ctx.messages) : (seen += 1) {
         tryOrFatal(client.ping());
         if (ctx.sleep_ns > 0) std.Thread.sleep(ctx.sleep_ns);
@@ -385,7 +385,7 @@ fn connectClient(allocator: std.mem.Allocator, server: []const u8, auth: ?client
     return try client_mod.Client.connect(allocator, address, auth);
 }
 
-fn waitForGate(gate: *types.StartGate, clients: u32) void {
+fn waitForGate(gate: *types.StartGate, clients: usize) void {
     while (gate.ready.load(.acquire) < clients) {
         std.Thread.sleep(std.time.ns_per_ms);
     }
@@ -401,10 +401,10 @@ fn waitForGo(gate: *types.StartGate) void {
     }
 }
 
-fn splitCount(total: u64, index: usize, clients: usize) u64 {
+fn splitCount(total: usize, index: usize, clients: usize) usize {
     const base = total / clients;
     const remainder = total % clients;
-    return base + @as(u64, if (index < remainder) 1 else 0);
+    return base + @as(usize, if (index < remainder) 1 else 0);
 }
 
 fn printBenchTotals(label: []const u8, totals: types.BenchTotals, elapsed_ns: i128) void {

@@ -15,12 +15,12 @@ pub const Command = union(enum) {
 pub const BenchCommon = struct {
     server: []const u8 = protocol_mod.default_client_server,
     clients: usize = 1,
-    msgs: u64 = 1000,
+    msgs: usize = 1000,
     size: usize = 128,
     sleep_ns: u64 = 0,
     no_progress: bool = false,
     multi_subject: bool = false,
-    multi_subject_max: u64 = 100_000,
+    multi_subject_max: usize = 100_000,
     queue: ?[]const u8 = null,
 };
 
@@ -58,7 +58,7 @@ pub const BenchCommand = union(enum) {
 };
 
 pub const StartGate = struct {
-    ready: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    ready: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     go: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 };
 

@@ -70,7 +70,7 @@ fn runSubscribe(allocator: std.mem.Allocator, cmd: protocol_mod.ClientSubscribe,
     var client = try connectClient(allocator, cmd.server, auth);
     defer client.deinit();
     try client.subscribe(cmd.subject, cmd.queue, cmd.sid);
-    var seen: u64 = 0;
+    var seen: usize = 0;
     while (true) {
         const maybe_msg = try client.nextMessage();
         const msg = maybe_msg orelse return error.UnexpectedEndOfStream;
@@ -108,7 +108,7 @@ fn runReply(allocator: std.mem.Allocator, cmd: protocol_mod.ClientReply, auth: ?
     var client = try connectClient(allocator, cmd.server, auth);
     defer client.deinit();
     try client.subscribe(cmd.subject, cmd.queue, cmd.sid);
-    var seen: u64 = 0;
+    var seen: usize = 0;
     while (true) {
         const msg = try client.nextMessage() orelse return error.UnexpectedEndOfStream;
         if (!std.mem.eql(u8, msg.subject, cmd.subject)) continue;
@@ -128,7 +128,7 @@ fn runReply(allocator: std.mem.Allocator, cmd: protocol_mod.ClientReply, auth: ?
 fn runPing(allocator: std.mem.Allocator, cmd: protocol_mod.ClientPing, auth: ?client_mod.Auth) !void {
     var client = try connectClient(allocator, cmd.server, auth);
     defer client.deinit();
-    var i: u64 = 0;
+    var i: usize = 0;
     while (i < cmd.count) : (i += 1) {
         try client.ping();
         std.debug.print("PONG\n", .{});

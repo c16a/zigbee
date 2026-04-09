@@ -128,7 +128,7 @@ pub const ClientSubscribe = struct {
     subject: []const u8,
     queue: ?[]const u8 = null,
     sid: u64 = 1,
-    count: ?u64 = null,
+    count: ?usize = null,
 };
 
 pub const ClientUnsubscribe = struct {
@@ -149,12 +149,12 @@ pub const ClientReply = struct {
     payload: []const u8,
     queue: ?[]const u8 = null,
     sid: u64 = 1,
-    count: ?u64 = null,
+    count: ?usize = null,
 };
 
 pub const ClientPing = struct {
     server: []const u8 = default_client_server,
-    count: u64 = 1,
+    count: usize = 1,
 };
 
 pub const ClientSession = struct {
@@ -324,7 +324,7 @@ fn parseLine(line: []const u8) !LineCommand {
                 .publish_header = .{
                     .subject = subject,
                     .reply = second,
-                    .size = try parseU64(size_text),
+                    .size = try parseUsize(size_text),
                 },
             };
         }
@@ -333,7 +333,7 @@ fn parseLine(line: []const u8) !LineCommand {
             .publish_header = .{
                 .subject = subject,
                 .reply = null,
-                .size = try parseU64(second),
+                .size = try parseUsize(second),
             },
         };
     }
@@ -343,6 +343,10 @@ fn parseLine(line: []const u8) !LineCommand {
 
 fn parseU64(text: []const u8) !u64 {
     return std.fmt.parseInt(u64, text, 10) catch error.InvalidNumber;
+}
+
+fn parseUsize(text: []const u8) !usize {
+    return std.fmt.parseInt(usize, text, 10) catch error.InvalidNumber;
 }
 
 fn trimLeft(text: []const u8) []const u8 {
