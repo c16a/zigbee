@@ -414,7 +414,7 @@ const RunningServer = struct {
     }
 
     fn listenAddress(self: *RunningServer) std.net.Address {
-        return self.server.listener.listen_address;
+        return self.server.listenAddress();
     }
 };
 
