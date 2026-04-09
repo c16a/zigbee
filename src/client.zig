@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 const std = @import("std");
+const crypto_mod = @import("crypto.zig");
+const protocol = @import("protocol.zig");
 
 pub const Message = struct {
     subject: []const u8,
@@ -13,6 +15,14 @@ pub const Frame = union(enum) {
     pong,
     err: []const u8,
     msg: Message,
+};
+
+pub const Auth = struct {
+    key_pair: crypto_mod.Ed25519.KeyPair,
+
+    pub fn fromSeed(seed: [crypto_mod.seed_length]u8) !Auth {
+        return .{ .key_pair = try crypto_mod.keyPairFromSeed(seed) };
+    }
 };
 
 const PendingMessage = struct {
@@ -41,7 +51,7 @@ pub const FrameReader = struct {
     }
 
     pub fn next(self: *FrameReader) !?Frame {
-        if (self.cursor > 0 and self.cursor > self.buffer.items.len / 2) {
+        if (self.pending_message == null and self.cursor > 0 and self.cursor > self.buffer.items.len / 2) {
             self.compact();
         }
 
@@ -128,12 +138,12 @@ pub const Client = struct {
     reader: FrameReader,
     scratch: [4096]u8 = undefined,
 
-    pub fn connect(allocator: std.mem.Allocator, address: std.net.Address) !Client {
+    pub fn connect(allocator: std.mem.Allocator, address: std.net.Address, auth: ?Auth) !Client {
         const stream = try std.net.tcpConnectToAddress(address);
-        return fromStream(allocator, stream);
+        return fromStream(allocator, stream, auth);
     }
 
-    pub fn fromStream(allocator: std.mem.Allocator, stream: std.net.Stream) !Client {
+    pub fn fromStream(allocator: std.mem.Allocator, stream: std.net.Stream, auth: ?Auth) !Client {
         var client = Client{
             .allocator = allocator,
             .stream = stream,
@@ -145,12 +155,15 @@ pub const Client = struct {
         while (true) {
             const frame = try client.nextFrame() orelse return error.UnexpectedEndOfStream;
             switch (frame) {
-                .info => break,
+                .info => |info_json| {
+                    const info = try parseInfo(allocator, info_json);
+                    defer info.deinit();
+                    try sendConnect(&client, info.value, auth);
+                    break;
+                },
                 else => continue,
             }
         }
-
-        try client.writeLine(&[_][]const u8{"CONNECT {}"});
         return client;
     }
 
@@ -246,6 +259,15 @@ pub const Client = struct {
     }
 };
 
+pub fn loadAuthFromSeedFile(allocator: std.mem.Allocator, path: []const u8) !Auth {
+    const contents = try std.fs.cwd().readFileAlloc(allocator, path, 16 * 1024);
+    defer allocator.free(contents);
+
+    const trimmed = std.mem.trim(u8, contents, " \t\r\n");
+    const seed = try crypto_mod.decodeBase64Fixed(crypto_mod.seed_length, trimmed);
+    return try Auth.fromSeed(seed);
+}
+
 pub fn makeInbox(allocator: std.mem.Allocator, prefix: []const u8) ![]u8 {
     const count = inbox_counter.fetchAdd(1, .monotonic);
     const now = @as(i128, std.time.nanoTimestamp());
@@ -270,4 +292,40 @@ fn trimLeft(text: []const u8) []const u8 {
     var i: usize = 0;
     while (i < text.len and text[i] == ' ') : (i += 1) {}
     return text[i..];
+}
+
+fn parseInfo(allocator: std.mem.Allocator, text: []const u8) !std.json.Parsed(protocol.Info) {
+    return try std.json.parseFromSlice(protocol.Info, allocator, text, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+}
+
+fn sendConnect(client: *Client, info: protocol.Info, auth: ?Auth) !void {
+    if (info.auth_required) {
+        const auth_data = auth orelse return error.AuthRequired;
+        if (!std.mem.eql(u8, info.auth_mode, "zkey")) return error.InvalidServerResponse;
+        const nonce_text = info.nonce orelse return error.InvalidServerResponse;
+        const nonce = try crypto_mod.decodeBase64Fixed(crypto_mod.seed_length, nonce_text);
+        const signature = try auth_data.key_pair.sign(nonce[0..], null);
+        const public_key = auth_data.key_pair.public_key.toBytes();
+        const public_key_text = try crypto_mod.encodeBase64(client.allocator, public_key[0..]);
+        defer client.allocator.free(public_key_text);
+        const signature_bytes = signature.toBytes();
+        const signature_text = try crypto_mod.encodeBase64(client.allocator, signature_bytes[0..]);
+        defer client.allocator.free(signature_text);
+
+        const connect_json = try protocol.formatConnectJson(client.allocator, .{
+            .auth_mode = "zkey",
+            .public_key = public_key_text,
+            .signature = signature_text,
+        });
+        defer client.allocator.free(connect_json);
+        try client.writeLine(&[_][]const u8{ "CONNECT ", connect_json });
+        return;
+    }
+
+    const connect_json = try protocol.formatConnectJson(client.allocator, .{ .auth_mode = "none" });
+    defer client.allocator.free(connect_json);
+    try client.writeLine(&[_][]const u8{ "CONNECT ", connect_json });
 }

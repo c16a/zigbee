@@ -3,8 +3,21 @@ const std = @import("std");
 
 pub const default_config_path = "zigbee.config.json";
 
+pub const AuthUser = struct {
+    name: ?[]const u8 = null,
+    public_key: []const u8,
+    allow_publish: []const []const u8 = &.{},
+    allow_subscribe: []const []const u8 = &.{},
+};
+
+pub const Auth = struct {
+    mode: []const u8 = "static_zkey",
+    users: []const AuthUser = &.{},
+};
+
 pub const Config = struct {
     listen_address: ?[]const u8 = null,
+    auth: ?Auth = null,
 };
 
 pub const LoadedConfig = struct {
@@ -33,11 +46,12 @@ pub fn loadFromDir(dir: std.fs.Dir, allocator: std.mem.Allocator, path: []const 
     };
     defer file.close();
 
-    const contents = try file.readToEndAlloc(allocator, 16 * 1024);
+    const contents = try file.readToEndAlloc(allocator, 128 * 1024);
     defer allocator.free(contents);
 
     const parsed = try std.json.parseFromSlice(Config, allocator, contents, .{
         .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
     });
     return .{ .parsed = parsed };
 }

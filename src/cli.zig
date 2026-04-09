@@ -15,7 +15,7 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    const command = parseCommand(allocator, args) catch |err| switch (err) {
+    const parsed = parseCommand(allocator, args) catch |err| switch (err) {
         error.HelpRequested => return,
         error.MissingCommand, error.UnknownCommand => {
             printUsage();
@@ -23,8 +23,15 @@ pub fn main() !void {
         },
         else => return err,
     };
-    try runCommand(allocator, command);
+
+    const auth = if (parsed.zkey_seed_path) |path| try client_mod.loadAuthFromSeedFile(allocator, path) else null;
+    try runCommand(allocator, parsed.command, auth);
 }
+
+const ParsedCommand = struct {
+    command: Command,
+    zkey_seed_path: ?[]const u8 = null,
+};
 
 const Command = union(enum) {
     client: protocol_mod.ClientCommand,
@@ -75,17 +82,26 @@ const BenchCommand = union(enum) {
     latency: BenchLatency,
 };
 
-fn parseCommand(allocator: std.mem.Allocator, args: []const []const u8) !Command {
+fn parseCommand(allocator: std.mem.Allocator, args: []const []const u8) !ParsedCommand {
     if (args.len <= 1) return error.HelpRequested;
     if (isHelpArg(args[1])) return error.HelpRequested;
 
     var cursor = ArgCursor.init(args[1..]);
     var global_server: ?[]const u8 = null;
+    var global_zkey_seed: ?[]const u8 = null;
 
     while (cursor.peek()) |arg| {
-        if (!std.mem.eql(u8, arg, "--server")) break;
-        _ = cursor.next();
-        global_server = try takeValue(&cursor, "--server");
+        if (std.mem.eql(u8, arg, "--server")) {
+            _ = cursor.next();
+            global_server = try takeValue(&cursor, "--server");
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--zkey-seed")) {
+            _ = cursor.next();
+            global_zkey_seed = try takeValue(&cursor, "--zkey-seed");
+            continue;
+        }
+        break;
     }
 
     const verb = cursor.next() orelse return error.MissingCommand;
@@ -108,7 +124,10 @@ fn parseCommand(allocator: std.mem.Allocator, args: []const []const u8) !Command
     if (global_server) |server| {
         command = applyGlobalServer(command, server);
     }
-    return command;
+    return .{
+        .command = command,
+        .zkey_seed_path = global_zkey_seed,
+    };
 }
 
 fn applyGlobalServer(command: Command, server: []const u8) Command {
@@ -155,17 +174,17 @@ fn applyGlobalServerCommon(common: BenchCommon, server: []const u8) BenchCommon 
     return common;
 }
 
-fn runCommand(allocator: std.mem.Allocator, command: Command) !void {
+fn runCommand(allocator: std.mem.Allocator, command: Command, auth: ?client_mod.Auth) !void {
     switch (command) {
         .client => |cmd| switch (cmd) {
-            .publish => |payload| try runPublish(allocator, payload),
-            .subscribe => |payload| try runSubscribe(allocator, payload),
-            .unsubscribe => |payload| try runUnsubscribe(allocator, payload),
-            .request => |payload| try runRequest(allocator, payload),
-            .reply => |payload| try runReply(allocator, payload),
-            .ping => |payload| try runPing(allocator, payload),
+            .publish => |payload| try runPublish(allocator, payload, auth),
+            .subscribe => |payload| try runSubscribe(allocator, payload, auth),
+            .unsubscribe => |payload| try runUnsubscribe(allocator, payload, auth),
+            .request => |payload| try runRequest(allocator, payload, auth),
+            .reply => |payload| try runReply(allocator, payload, auth),
+            .ping => |payload| try runPing(allocator, payload, auth),
         },
-        .bench => |cmd| try runBench(allocator, cmd),
+        .bench => |cmd| try runBench(allocator, cmd, auth),
     }
 }
 
@@ -174,7 +193,7 @@ fn isHelpArg(arg: []const u8) bool {
 }
 
 fn printUsage() void {
-    std.debug.print("Usage: zigbee-cli [--server IP:port] <command> ...\n", .{});
+    std.debug.print("Usage: zigbee-cli [--server IP:port] [--zkey-seed path] <command> ...\n", .{});
     std.debug.print("\nCommands:\n", .{});
     for (protocol_mod.client_verbs) |verb| {
         std.debug.print("  {s}\n", .{protocol_mod.clientVerbName(verb)});
@@ -478,15 +497,15 @@ fn parseDuration(text: []const u8) !u64 {
     return (try parseU64(text)) * std.time.ns_per_ms;
 }
 
-fn runPublish(allocator: std.mem.Allocator, cmd: protocol_mod.ClientPublish) !void {
-    var client = try connectClient(allocator, cmd.server);
+fn runPublish(allocator: std.mem.Allocator, cmd: protocol_mod.ClientPublish, auth: ?client_mod.Auth) !void {
+    var client = try connectClient(allocator, cmd.server, auth);
     defer client.deinit();
     try client.publish(cmd.subject, cmd.reply, cmd.payload);
     std.debug.print("published {d} bytes to \"{s}\"\n", .{ cmd.payload.len, cmd.subject });
 }
 
-fn runSubscribe(allocator: std.mem.Allocator, cmd: protocol_mod.ClientSubscribe) !void {
-    var client = try connectClient(allocator, cmd.server);
+fn runSubscribe(allocator: std.mem.Allocator, cmd: protocol_mod.ClientSubscribe, auth: ?client_mod.Auth) !void {
+    var client = try connectClient(allocator, cmd.server, auth);
     defer client.deinit();
     try client.subscribe(cmd.subject, cmd.queue, cmd.sid);
     var seen: u64 = 0;
@@ -505,15 +524,15 @@ fn runSubscribe(allocator: std.mem.Allocator, cmd: protocol_mod.ClientSubscribe)
     }
 }
 
-fn runUnsubscribe(allocator: std.mem.Allocator, cmd: protocol_mod.ClientUnsubscribe) !void {
-    var client = try connectClient(allocator, cmd.server);
+fn runUnsubscribe(allocator: std.mem.Allocator, cmd: protocol_mod.ClientUnsubscribe, auth: ?client_mod.Auth) !void {
+    var client = try connectClient(allocator, cmd.server, auth);
     defer client.deinit();
     try client.unsubscribe(cmd.sid, cmd.max);
     std.debug.print("sent UNSUB for sid {d}\n", .{cmd.sid});
 }
 
-fn runRequest(allocator: std.mem.Allocator, cmd: protocol_mod.ClientRequest) !void {
-    var client = try connectClient(allocator, cmd.server);
+fn runRequest(allocator: std.mem.Allocator, cmd: protocol_mod.ClientRequest, auth: ?client_mod.Auth) !void {
+    var client = try connectClient(allocator, cmd.server, auth);
     defer client.deinit();
     const inbox = try client_mod.makeInbox(allocator, "request");
     defer allocator.free(inbox);
@@ -523,8 +542,8 @@ fn runRequest(allocator: std.mem.Allocator, cmd: protocol_mod.ClientRequest) !vo
     std.debug.print("{s}\n", .{msg.payload});
 }
 
-fn runReply(allocator: std.mem.Allocator, cmd: protocol_mod.ClientReply) !void {
-    var client = try connectClient(allocator, cmd.server);
+fn runReply(allocator: std.mem.Allocator, cmd: protocol_mod.ClientReply, auth: ?client_mod.Auth) !void {
+    var client = try connectClient(allocator, cmd.server, auth);
     defer client.deinit();
     try client.subscribe(cmd.subject, cmd.queue, cmd.sid);
     var seen: u64 = 0;
@@ -544,8 +563,8 @@ fn runReply(allocator: std.mem.Allocator, cmd: protocol_mod.ClientReply) !void {
     }
 }
 
-fn runPing(allocator: std.mem.Allocator, cmd: protocol_mod.ClientPing) !void {
-    var client = try connectClient(allocator, cmd.server);
+fn runPing(allocator: std.mem.Allocator, cmd: protocol_mod.ClientPing, auth: ?client_mod.Auth) !void {
+    var client = try connectClient(allocator, cmd.server, auth);
     defer client.deinit();
     var i: u64 = 0;
     while (i < cmd.count) : (i += 1) {
@@ -554,9 +573,9 @@ fn runPing(allocator: std.mem.Allocator, cmd: protocol_mod.ClientPing) !void {
     }
 }
 
-fn connectClient(allocator: std.mem.Allocator, server: []const u8) !client_mod.Client {
+fn connectClient(allocator: std.mem.Allocator, server: []const u8, auth: ?client_mod.Auth) !client_mod.Client {
     const address = try client_mod.parseServerAddress(server);
-    return try client_mod.Client.connect(allocator, address);
+    return try client_mod.Client.connect(allocator, address, auth);
 }
 
 fn printMessage(prefix: []const u8, msg: client_mod.Message) void {
@@ -578,17 +597,17 @@ const BenchTotals = struct {
     bytes: u64 = 0,
 };
 
-fn runBench(allocator: std.mem.Allocator, cmd: BenchCommand) !void {
+fn runBench(allocator: std.mem.Allocator, cmd: BenchCommand, auth: ?client_mod.Auth) !void {
     switch (cmd) {
-        .publish => |bench| try runBenchPublish(allocator, bench),
-        .subscribe => |bench| try runBenchSubscribe(allocator, bench),
-        .request => |bench| try runBenchRequest(allocator, bench),
-        .reply => |bench| try runBenchReply(allocator, bench),
-        .latency => |bench| try runBenchLatency(allocator, bench),
+        .publish => |bench| try runBenchPublish(allocator, bench, auth),
+        .subscribe => |bench| try runBenchSubscribe(allocator, bench, auth),
+        .request => |bench| try runBenchRequest(allocator, bench, auth),
+        .reply => |bench| try runBenchReply(allocator, bench, auth),
+        .latency => |bench| try runBenchLatency(allocator, bench, auth),
     }
 }
 
-fn runBenchPublish(allocator: std.mem.Allocator, bench: BenchPublish) !void {
+fn runBenchPublish(allocator: std.mem.Allocator, bench: BenchPublish, auth: ?client_mod.Auth) !void {
     const client_count = if (bench.common.clients > 0) bench.common.clients else 1;
     const payload = try allocator.alloc(u8, bench.common.size);
     defer allocator.free(payload);
@@ -605,6 +624,7 @@ fn runBenchPublish(allocator: std.mem.Allocator, bench: BenchPublish) !void {
         contexts[index] = .{
             .allocator = allocator,
             .server = bench.common.server,
+            .auth = auth,
             .subject = bench.subject,
             .payload = payload,
             .messages = splitCount(bench.common.msgs, index, client_count),
@@ -636,6 +656,7 @@ fn runBenchPublish(allocator: std.mem.Allocator, bench: BenchPublish) !void {
 const PubWorker = struct {
     allocator: std.mem.Allocator,
     server: []const u8,
+    auth: ?client_mod.Auth,
     subject: []const u8,
     payload: []const u8,
     messages: u64,
@@ -649,7 +670,7 @@ const PubWorker = struct {
 };
 
 fn benchPublishWorker(ctx: *PubWorker) void {
-    var client = connectClient(ctx.allocator, ctx.server) catch |err| fatal(err);
+    var client = connectClient(ctx.allocator, ctx.server, ctx.auth) catch |err| fatal(err);
     defer client.deinit();
     signalReady(ctx.gate);
     waitForGo(ctx.gate);
@@ -668,7 +689,7 @@ fn benchPublishWorker(ctx: *PubWorker) void {
     ctx.bytes_done = ctx.messages * ctx.payload.len;
 }
 
-fn runBenchSubscribe(allocator: std.mem.Allocator, bench: BenchSubscribe) !void {
+fn runBenchSubscribe(allocator: std.mem.Allocator, bench: BenchSubscribe, auth: ?client_mod.Auth) !void {
     const client_count = if (bench.common.clients > 0) bench.common.clients else 1;
     var gate = StartGate{};
     var threads = try allocator.alloc(std.Thread, client_count);
@@ -681,6 +702,7 @@ fn runBenchSubscribe(allocator: std.mem.Allocator, bench: BenchSubscribe) !void 
         contexts[index] = .{
             .allocator = allocator,
             .server = bench.common.server,
+            .auth = auth,
             .subject = bench.subject,
             .messages = bench.common.msgs,
             .sleep_ns = bench.common.sleep_ns,
@@ -709,6 +731,7 @@ fn runBenchSubscribe(allocator: std.mem.Allocator, bench: BenchSubscribe) !void 
 const SubWorker = struct {
     allocator: std.mem.Allocator,
     server: []const u8,
+    auth: ?client_mod.Auth,
     subject: []const u8,
     messages: u64,
     sleep_ns: u64,
@@ -719,7 +742,7 @@ const SubWorker = struct {
 };
 
 fn benchSubscribeWorker(ctx: *SubWorker) void {
-    var client = connectClient(ctx.allocator, ctx.server) catch |err| fatal(err);
+    var client = connectClient(ctx.allocator, ctx.server, ctx.auth) catch |err| fatal(err);
     defer client.deinit();
     tryOrFatal(client.subscribe(ctx.subject, null, 1));
     signalReady(ctx.gate);
@@ -737,7 +760,7 @@ fn benchSubscribeWorker(ctx: *SubWorker) void {
     ctx.messages_done = seen;
 }
 
-fn runBenchRequest(allocator: std.mem.Allocator, bench: BenchRequest) !void {
+fn runBenchRequest(allocator: std.mem.Allocator, bench: BenchRequest, auth: ?client_mod.Auth) !void {
     const client_count = if (bench.common.clients > 0) bench.common.clients else 1;
     const payload = try allocator.alloc(u8, bench.common.size);
     defer allocator.free(payload);
@@ -754,6 +777,7 @@ fn runBenchRequest(allocator: std.mem.Allocator, bench: BenchRequest) !void {
         contexts[index] = .{
             .allocator = allocator,
             .server = bench.common.server,
+            .auth = auth,
             .subject = bench.subject,
             .payload = payload,
             .messages = splitCount(bench.common.msgs, index, client_count),
@@ -782,6 +806,7 @@ fn runBenchRequest(allocator: std.mem.Allocator, bench: BenchRequest) !void {
 const RequestWorker = struct {
     allocator: std.mem.Allocator,
     server: []const u8,
+    auth: ?client_mod.Auth,
     subject: []const u8,
     payload: []const u8,
     messages: u64,
@@ -792,7 +817,7 @@ const RequestWorker = struct {
 };
 
 fn benchRequestWorker(ctx: *RequestWorker) void {
-    var client = connectClient(ctx.allocator, ctx.server) catch |err| fatal(err);
+    var client = connectClient(ctx.allocator, ctx.server, ctx.auth) catch |err| fatal(err);
     defer client.deinit();
     const inbox = client_mod.makeInbox(ctx.allocator, "bench") catch |err| fatal(err);
     defer ctx.allocator.free(inbox);
@@ -810,7 +835,7 @@ fn benchRequestWorker(ctx: *RequestWorker) void {
     ctx.bytes_done = ctx.messages * ctx.payload.len;
 }
 
-fn runBenchReply(allocator: std.mem.Allocator, bench: BenchReply) !void {
+fn runBenchReply(allocator: std.mem.Allocator, bench: BenchReply, auth: ?client_mod.Auth) !void {
     const client_count = if (bench.common.clients > 0) bench.common.clients else 1;
     const payload = try allocator.alloc(u8, bench.common.size);
     defer allocator.free(payload);
@@ -827,6 +852,7 @@ fn runBenchReply(allocator: std.mem.Allocator, bench: BenchReply) !void {
         contexts[index] = .{
             .allocator = allocator,
             .server = bench.common.server,
+            .auth = auth,
             .subject = bench.subject,
             .queue = bench.queue,
             .payload = payload,
@@ -856,6 +882,7 @@ fn runBenchReply(allocator: std.mem.Allocator, bench: BenchReply) !void {
 const ReplyWorker = struct {
     allocator: std.mem.Allocator,
     server: []const u8,
+    auth: ?client_mod.Auth,
     subject: []const u8,
     queue: []const u8,
     payload: []const u8,
@@ -867,7 +894,7 @@ const ReplyWorker = struct {
 };
 
 fn benchReplyWorker(ctx: *ReplyWorker) void {
-    var client = connectClient(ctx.allocator, ctx.server) catch |err| fatal(err);
+    var client = connectClient(ctx.allocator, ctx.server, ctx.auth) catch |err| fatal(err);
     defer client.deinit();
     tryOrFatal(client.subscribe(ctx.subject, ctx.queue, 1));
     signalReady(ctx.gate);
@@ -888,7 +915,7 @@ fn benchReplyWorker(ctx: *ReplyWorker) void {
     ctx.bytes_done = seen * ctx.payload.len;
 }
 
-fn runBenchLatency(allocator: std.mem.Allocator, bench: BenchLatency) !void {
+fn runBenchLatency(allocator: std.mem.Allocator, bench: BenchLatency, auth: ?client_mod.Auth) !void {
     const client_count = if (bench.common.clients > 0) bench.common.clients else 1;
     var gate = StartGate{};
     var threads = try allocator.alloc(std.Thread, client_count);
@@ -901,6 +928,7 @@ fn runBenchLatency(allocator: std.mem.Allocator, bench: BenchLatency) !void {
         contexts[index] = .{
             .allocator = allocator,
             .server = bench.common.server,
+            .auth = auth,
             .messages = splitCount(bench.common.msgs, index, client_count),
             .sleep_ns = bench.common.sleep_ns,
             .gate = &gate,
@@ -925,6 +953,7 @@ fn runBenchLatency(allocator: std.mem.Allocator, bench: BenchLatency) !void {
 const LatencyWorker = struct {
     allocator: std.mem.Allocator,
     server: []const u8,
+    auth: ?client_mod.Auth,
     messages: u64,
     sleep_ns: u64,
     gate: *StartGate,
@@ -932,7 +961,7 @@ const LatencyWorker = struct {
 };
 
 fn benchLatencyWorker(ctx: *LatencyWorker) void {
-    var client = connectClient(ctx.allocator, ctx.server) catch |err| fatal(err);
+    var client = connectClient(ctx.allocator, ctx.server, ctx.auth) catch |err| fatal(err);
     defer client.deinit();
     signalReady(ctx.gate);
     waitForGo(ctx.gate);
@@ -989,29 +1018,29 @@ fn fatal(err: anyerror) noreturn {
 
 test "parse publish command" {
     const argv = [_][]const u8{ "zigbee-cli", "pub", "--server", "127.0.0.1:4222", "foo", "hello", "world" };
-    const cmd = try parseCommand(std.testing.allocator, argv[0..]);
-    defer std.testing.allocator.free(cmd.client.publish.payload);
-    try std.testing.expect(cmd == .client);
-    try std.testing.expect(cmd.client == .publish);
-    try std.testing.expectEqualStrings("foo", cmd.client.publish.subject);
-    try std.testing.expectEqualStrings("hello world", cmd.client.publish.payload);
-    try std.testing.expectEqualStrings("127.0.0.1:4222", cmd.client.publish.server);
+    const parsed = try parseCommand(std.testing.allocator, argv[0..]);
+    defer std.testing.allocator.free(parsed.command.client.publish.payload);
+    try std.testing.expect(parsed.command == .client);
+    try std.testing.expect(parsed.command.client == .publish);
+    try std.testing.expectEqualStrings("foo", parsed.command.client.publish.subject);
+    try std.testing.expectEqualStrings("hello world", parsed.command.client.publish.payload);
+    try std.testing.expectEqualStrings("127.0.0.1:4222", parsed.command.client.publish.server);
 }
 
 test "parse global server ping command" {
     const argv = [_][]const u8{ "zigbee-cli", "--server", "127.0.0.1:4222", "ping" };
-    const cmd = try parseCommand(std.testing.allocator, argv[0..]);
-    try std.testing.expect(cmd == .client);
-    try std.testing.expect(cmd.client == .ping);
-    try std.testing.expectEqualStrings("127.0.0.1:4222", cmd.client.ping.server);
+    const parsed = try parseCommand(std.testing.allocator, argv[0..]);
+    try std.testing.expect(parsed.command == .client);
+    try std.testing.expect(parsed.command.client == .ping);
+    try std.testing.expectEqualStrings("127.0.0.1:4222", parsed.command.client.ping.server);
 }
 
 test "parse bench request command" {
     const argv = [_][]const u8{ "zigbee-cli", "bench", "request", "--clients", "4", "--msgs", "1000", "foo" };
-    const cmd = try parseCommand(std.testing.allocator, argv[0..]);
-    try std.testing.expect(cmd == .bench);
-    try std.testing.expect(cmd.bench == .request);
-    try std.testing.expectEqual(@as(usize, 4), cmd.bench.request.common.clients);
-    try std.testing.expectEqual(@as(u64, 1000), cmd.bench.request.common.msgs);
-    try std.testing.expectEqualStrings("foo", cmd.bench.request.subject);
+    const parsed = try parseCommand(std.testing.allocator, argv[0..]);
+    try std.testing.expect(parsed.command == .bench);
+    try std.testing.expect(parsed.command.bench == .request);
+    try std.testing.expectEqual(@as(usize, 4), parsed.command.bench.request.common.clients);
+    try std.testing.expectEqual(@as(u64, 1000), parsed.command.bench.request.common.msgs);
+    try std.testing.expectEqualStrings("foo", parsed.command.bench.request.subject);
 }

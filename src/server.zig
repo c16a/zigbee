@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: MIT
 const std = @import("std");
 const broker_mod = @import("broker.zig");
+const auth_mod = @import("auth.zig");
+const config_mod = @import("config.zig");
+const crypto_mod = @import("crypto.zig");
 const session = @import("session.zig");
 const protocol = @import("protocol.zig");
 
 pub const Server = struct {
     allocator: std.mem.Allocator,
     broker: *broker_mod.Broker,
+    auth: ?auth_mod.Store,
     listener: std.net.Server,
     sessions_mutex: std.Thread.Mutex = .{},
     sessions: std.AutoHashMap(u64, *session.Session),
@@ -14,13 +18,19 @@ pub const Server = struct {
     client_threads: std.ArrayList(std.Thread) = .empty,
     next_session_id: u64 = 1,
 
-    pub fn start(allocator: std.mem.Allocator, broker: *broker_mod.Broker, address: std.net.Address) !Server {
-        return .{
+    pub fn start(allocator: std.mem.Allocator, broker: *broker_mod.Broker, address: std.net.Address, auth_cfg: ?config_mod.Auth) !Server {
+        var server = Server{
             .allocator = allocator,
             .broker = broker,
+            .auth = null,
             .listener = try address.listen(.{ .reuse_address = true }),
             .sessions = std.AutoHashMap(u64, *session.Session).init(allocator),
         };
+        errdefer server.listener.deinit();
+        if (auth_cfg) |cfg| {
+            server.auth = try auth_mod.Store.initFromConfig(allocator, cfg);
+        }
+        return server;
     }
 
     pub fn deinit(self: *Server) void {
@@ -39,6 +49,9 @@ pub const Server = struct {
         self.sessions_mutex.lock();
         defer self.sessions_mutex.unlock();
 
+        if (self.auth) |*auth| {
+            auth.deinit();
+        }
         for (self.all_sessions.items) |s| {
             self.allocator.destroy(s);
         }
@@ -147,12 +160,46 @@ fn clientMain(server: *Server, s: *session.Session) void {
     defer server.broker.unsubscribeSession(s.id);
     defer server.unregisterSession(s.id);
 
-    server.sendMsg(s.id, .{ .info = .{ .port = server.listener.listen_address.getPort() } });
+    const auth_required = server.auth != null;
+    var auth_done = std.atomic.Value(bool).init(false);
+
+    var auth_watchdog: ?std.Thread = null;
+    if (auth_required) {
+        auth_watchdog = std.Thread.spawn(.{}, authDeadlineWatcher, .{
+            server,
+            s,
+            s.id,
+            &auth_done,
+        }) catch return;
+        defer if (auth_watchdog) |thread| thread.join();
+        defer auth_done.store(true, .release);
+    }
+
+    var nonce: [crypto_mod.seed_length]u8 = undefined;
+    if (auth_required) {
+        std.crypto.random.bytes(&nonce);
+    }
+
+    var nonce_text: ?[]u8 = null;
+    defer if (nonce_text) |text| server.allocator.free(text);
+    if (auth_required) {
+        nonce_text = crypto_mod.encodeBase64(server.allocator, nonce[0..]) catch return;
+    }
+
+    server.sendMsg(s.id, .{ .info = .{
+        .port = server.listener.listen_address.getPort(),
+        .auth_required = auth_required,
+        .auth_mode = if (auth_required) "zkey" else "none",
+        .nonce = nonce_text,
+    } });
 
     var reader = protocol.Reader.init(server.allocator);
     defer reader.deinit();
 
     var buffer: [4096]u8 = undefined;
+    var saw_connect = false;
+    var authenticated = !auth_required;
+    var principal: ?*const auth_mod.Principal = null;
 
     while (true) {
         while (reader.next() catch |err| {
@@ -160,15 +207,115 @@ fn clientMain(server: *Server, s: *session.Session) void {
             return;
         }) |command| {
             switch (command) {
-                .ping => server.sendMsg(s.id, .pong),
-                .pong => {},
-                .connect => {},
-                .sub => |sub| server.broker.subscribe(s.id, sub.sid, sub.subject, sub.queue) catch |err| {
-                    server.sendErr(s.id, @errorName(err));
-                    return;
+                .connect => |connect_json| {
+                    if (saw_connect) {
+                        server.sendErr(s.id, "duplicate CONNECT");
+                        return;
+                    }
+                    saw_connect = true;
+
+                    const parsed = std.json.parseFromSlice(protocol.Connect, server.allocator, connect_json, .{
+                        .allocate = .alloc_always,
+                        .ignore_unknown_fields = true,
+                    }) catch {
+                        server.sendErr(s.id, "auth failed");
+                        return;
+                    };
+                    defer parsed.deinit();
+
+                    if (auth_required) {
+                        if (!std.mem.eql(u8, parsed.value.auth_mode, "zkey")) {
+                            server.sendErr(s.id, "auth failed");
+                            return;
+                        }
+
+                        const store = server.auth.?;
+                        const public_key_text = parsed.value.public_key orelse {
+                            server.sendErr(s.id, "auth failed");
+                            return;
+                        };
+                        const signature_text = parsed.value.signature orelse {
+                            server.sendErr(s.id, "auth failed");
+                            return;
+                        };
+
+                        const public_key = auth_mod.decodePublicKey(public_key_text) catch {
+                            server.sendErr(s.id, "invalid public key");
+                            return;
+                        };
+                        const signature = auth_mod.decodeSignature(signature_text) catch {
+                            server.sendErr(s.id, "invalid signature");
+                            return;
+                        };
+
+                        principal = store.lookupByPublicKey(public_key.bytes) orelse {
+                            server.sendErr(s.id, "unknown key");
+                            return;
+                        };
+                        if (!auth_mod.verifyNonceSignature(public_key, nonce[0..], signature)) {
+                            server.sendErr(s.id, "invalid signature");
+                            return;
+                        }
+                    }
+
+                    authenticated = true;
+                    auth_done.store(true, .release);
                 },
-                .unsub => |unsub| server.broker.unsubscribe(s.id, unsub.sid, unsub.max),
+                .ping => {
+                    if (!authenticated) {
+                        server.sendErr(s.id, "auth required");
+                        return;
+                    }
+                    server.sendMsg(s.id, .pong);
+                },
+                .pong => {
+                    if (!authenticated) {
+                        server.sendErr(s.id, "auth required");
+                        return;
+                    }
+                },
+                .sub => |sub| {
+                    if (auth_required and !authenticated) {
+                        server.sendErr(s.id, "auth required");
+                        return;
+                    }
+                    if (server.auth) |_| {
+                        const current = principal orelse {
+                            server.sendErr(s.id, "auth required");
+                            return;
+                        };
+                        if (!auth_mod.canSubscribe(&current.permissions, sub.subject)) {
+                            server.sendErr(s.id, "permission denied");
+                            return;
+                        }
+                    }
+                    server.broker.subscribe(s.id, sub.sid, sub.subject, sub.queue) catch |err| {
+                        server.sendErr(s.id, @errorName(err));
+                        return;
+                    };
+                },
+                .unsub => |unsub| {
+                    if (auth_required and !authenticated) {
+                        server.sendErr(s.id, "auth required");
+                        return;
+                    }
+                    server.broker.unsubscribe(s.id, unsub.sid, unsub.max);
+                },
                 .publish => |publish| {
+                    if (auth_required and !authenticated) {
+                        server.sendErr(s.id, "auth required");
+                        return;
+                    }
+                    if (server.auth) |_| {
+                        const current = principal orelse {
+                            server.sendErr(s.id, "auth required");
+                            return;
+                        };
+                        if (!auth_mod.canPublish(&current.permissions, publish.subject)) {
+                            server.sendErr(s.id, "permission denied");
+                            return;
+                        }
+                    }
                     const deliveries = server.broker.publish(publish.subject) catch |err| {
                         server.sendErr(s.id, @errorName(err));
                         return;
@@ -191,4 +338,16 @@ fn clientMain(server: *Server, s: *session.Session) void {
         if (read_len == 0) break;
         reader.feed(buffer[0..read_len]) catch break;
     }
+}
+
+fn authDeadlineWatcher(server: *Server, s: *session.Session, session_id: u64, done: *std.atomic.Value(bool)) void {
+    const deadline = std.time.nanoTimestamp() + 5 * std.time.ns_per_s;
+    while (std.time.nanoTimestamp() < deadline) {
+        if (done.load(.acquire)) return;
+        std.Thread.sleep(50 * std.time.ns_per_ms);
+    }
+
+    if (done.load(.acquire)) return;
+    server.sendErr(session_id, "auth timeout");
+    s.close();
 }

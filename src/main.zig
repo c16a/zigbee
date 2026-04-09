@@ -24,7 +24,8 @@ pub fn main() !void {
     defer broker.deinit();
 
     const address = try resolveListenAddress(config);
-    var server = try server_mod.Server.start(allocator, &broker, address);
+    const auth_cfg = if (config) |loaded| loaded.value().auth else null;
+    var server = try server_mod.Server.start(allocator, &broker, address, auth_cfg);
     defer server.deinit();
 
     std.log.info("zigbee server listening on {any}", .{address});

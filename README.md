@@ -33,18 +33,37 @@ zig build run -- --config zigbee.config.json
 
 If `zigbee.config.json` is absent, the server listens on `0.0.0.0:4222`.
 
+Connection rule:
+
+- If `auth` is not configured, clients may publish and subscribe immediately after TCP connect.
+- If `auth.mode = "static_zkey"` is configured, clients must first send a valid `CONNECT` with `--zkey-seed`-backed auth material.
+
 Example configuration:
 
 ```json
 {
-  "listen_address": "0.0.0.0:4222"
+  "listen_address": "0.0.0.0:4222",
+  "auth": {
+    "mode": "static_zkey",
+    "users": [
+      {
+        "name": "service-a",
+        "public_key": "BASE64_PUBLIC_KEY",
+        "allow_publish": ["events.>", "rpc.requests"],
+        "allow_subscribe": ["rpc.replies", "updates.>"]
+      }
+    ]
+  }
 }
 ```
 
 ## CLI
 
 The CLI connects to a broker with `--server IP:port`. If omitted, it defaults to `127.0.0.1:4222`.
-You can place `--server` before the command name as a global flag.
+You can place `--server` and `--zkey-seed` before the command name as global flags.
+
+If the broker requires zkey auth, pass `--zkey-seed path/to/seed.b64` so the client can sign the server nonce.
+If the broker does not require auth, `--zkey-seed` is optional and `CONNECT` is not needed before `PUB` or `SUB`.
 
 ### Commands
 
