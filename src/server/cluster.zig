@@ -342,8 +342,8 @@ pub const Cluster = struct {
                 var local = try self.collectLocalDeliveriesLocked(publish_msg.subject);
                 defer local.deinit(self.allocator);
                 self.mutex.unlock();
-                defer self.mutex.lock();
                 self.deliverLocal(local.items, publish_msg.subject, publish_msg.reply, payload);
+                self.mutex.lock();
             }
         } else if (std.mem.eql(u8, packet.kind, "heartbeat")) {
             // Keepalive only.
