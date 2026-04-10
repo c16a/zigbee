@@ -27,8 +27,11 @@ pub fn main() !void {
     const listen_text = if (config) |loaded| loaded.value().listen_address orelse "0.0.0.0:4222" else "0.0.0.0:4222";
     const loaded_config = if (config) |loaded| loaded.value() else config_mod.Config{};
     const auth_cfg = loaded_config.auth;
-    var server = try server_mod.Server.start(allocator, &broker, address, auth_cfg, loaded_config.verbose);
-    defer server.deinit();
+    const server = try server_mod.Server.start(allocator, &broker, address, auth_cfg, loaded_config.cluster, loaded_config.verbose);
+    defer {
+        server.deinit();
+        allocator.destroy(server);
+    }
 
     std.log.info("zigbee server listening on {s}", .{listen_text});
     try server.serve();

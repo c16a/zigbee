@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT
 const std = @import("std");
+const posix = std.posix;
 const auth_mod = @import("server/auth.zig");
 const config_mod = @import("server/config.zig");
+const cluster_mod = @import("server/cluster.zig");
+const server_mod = @import("server/server.zig");
 const client_mod = @import("common_client");
 const crypto_mod = client_mod.crypto_mod;
 const broker_mod = @import("server/broker.zig");
@@ -92,6 +95,243 @@ test "config verbose can be disabled" {
     try std.testing.expect(!loaded.?.value().verbose);
 }
 
+test "config cluster settings load" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "zigbee.config.json",
+        .data = "{\"cluster\":{\"bind_address\":\"10.0.0.1:4333\",\"peer_addresses\":[\"10.0.0.2:4333\",\"10.0.0.3:4333\"],\"heartbeat_interval_ms\":2500}}",
+    });
+
+    var loaded = try config_mod.loadFromDir(tmp.dir, allocator, "zigbee.config.json", true);
+    try std.testing.expect(loaded != null);
+    defer loaded.?.deinit();
+    try std.testing.expectEqualStrings("10.0.0.1:4333", loaded.?.value().cluster.bind_address.?);
+    try std.testing.expectEqual(@as(usize, 2), loaded.?.value().cluster.peer_addresses.len);
+    try std.testing.expectEqualStrings("10.0.0.2:4333", loaded.?.value().cluster.peer_addresses[0]);
+    try std.testing.expectEqual(@as(u32, 2500), loaded.?.value().cluster.heartbeat_interval_ms);
+}
+
+test "cluster packet envelope roundtrips" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const packet = protocol.ClusterPacket{
+        .kind = "publish",
+        .origin_id = 123,
+        .seq = 456,
+        .publish = .{
+            .subject = "foo.bar",
+            .reply = "inbox",
+            .payload_b64 = "aGVsbG8=",
+        },
+    };
+    const json = try protocol.formatClusterPacketJson(allocator, packet);
+    defer allocator.free(json);
+
+    const parsed = try std.json.parseFromSlice(protocol.ClusterPacket, allocator, json, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("publish", parsed.value.kind);
+    try std.testing.expectEqual(@as(u64, 123), parsed.value.origin_id);
+    try std.testing.expectEqualStrings("foo.bar", parsed.value.publish.?.subject);
+}
+
+test "cluster retries dropped publish until ack" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var thread_safe = std.heap.ThreadSafeAllocator{
+        .child_allocator = std.heap.page_allocator,
+    };
+    const allocator = thread_safe.allocator();
+
+    var sender = try cluster_mod.Cluster.init(allocator, .{
+        .bind_address = "127.0.0.1:49422",
+        .peer_addresses = &.{},
+    }, null, null);
+    defer sender.deinit();
+    try sender.startThread();
+
+    const sender_address = try std.net.Address.parseIp("127.0.0.1", 49422);
+
+    var peer = try UdpPeer.bind("127.0.0.1", 0, sender_address);
+
+    const peer_id = 0xfeedfacecafebeef;
+    try peer.sendPacket(allocator, .{
+        .kind = "sub",
+        .origin_id = peer_id,
+        .seq = 1,
+        .subscription = .{
+            .session_id = 1,
+            .sid = 1,
+            .subject = "jobs.>",
+            .queue = "workers",
+        },
+    });
+
+    var sub_ack = try peer.waitForPacket(allocator, "ack", 500) orelse return error.ExpectedAck;
+    defer sub_ack.deinit(allocator);
+
+    const peer_address = peer.address;
+    peer.deinit();
+
+    const deliveries = try sender.publish("jobs.1", null, "payload");
+    defer allocator.free(deliveries);
+    try std.testing.expectEqual(@as(usize, 0), deliveries.len);
+
+    std.Thread.sleep(50 * std.time.ns_per_ms);
+
+    var retry_peer = try UdpPeer.bindAddress(peer_address, sender_address);
+    defer retry_peer.deinit();
+
+    var publish = try retry_peer.waitForPacket(allocator, "publish", 1500) orelse return error.ExpectedRetryPacket;
+    defer publish.deinit(allocator);
+    try std.testing.expectEqualStrings("jobs.1", publish.publish_subject.?);
+    const payload_text = try retry_peer.payloadText(allocator, publish.publish_payload_b64.?);
+    defer allocator.free(payload_text);
+    try std.testing.expectEqualStrings("payload", payload_text);
+
+    try retry_peer.sendPacket(allocator, .{
+        .kind = "ack",
+        .origin_id = peer_id,
+        .seq = 2,
+        .ack_origin_id = publish.origin_id,
+        .ack_seq = publish.seq,
+    });
+
+    const no_retry = try retry_peer.waitForPacket(allocator, "publish", 350);
+    try std.testing.expect(no_retry == null);
+}
+
+test "cluster pub sub unsubscribe works for configurable sizes" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var thread_safe = std.heap.ThreadSafeAllocator{
+        .child_allocator = std.heap.page_allocator,
+    };
+    const allocator = thread_safe.allocator();
+
+    const cluster_size = 5;
+    try runClusterPubSubUnsubscribeScenario(allocator, cluster_size);
+}
+
+fn runClusterPubSubUnsubscribeScenario(allocator: std.mem.Allocator, cluster_size: usize) !void {
+    try std.testing.expect(cluster_size >= 2);
+
+    var listen_addresses = try allocator.alloc(std.net.Address, cluster_size);
+    defer allocator.free(listen_addresses);
+
+    var cluster_ports = try allocator.alloc(u16, cluster_size);
+    defer allocator.free(cluster_ports);
+
+    var cluster_binds = std.ArrayList([]u8).empty;
+    defer {
+        for (cluster_binds.items) |bind| allocator.free(bind);
+        cluster_binds.deinit(allocator);
+    }
+
+    var nodes = std.ArrayList(*RunningServer).empty;
+    defer {
+        for (nodes.items) |node| node.deinit();
+        nodes.deinit(allocator);
+    }
+
+    for (0..cluster_size) |i| {
+        listen_addresses[i] = try std.net.Address.parseIp("127.0.0.1", 0);
+        cluster_ports[i] = try reserveUdpPort("127.0.0.1");
+        try cluster_binds.append(allocator, try std.fmt.allocPrint(allocator, "127.0.0.1:{d}", .{cluster_ports[i]}));
+    }
+
+    for (0..cluster_size) |i| {
+        var peers = std.ArrayList([]const u8).empty;
+        defer peers.deinit(allocator);
+
+        for (0..cluster_size) |j| {
+            if (j == i) continue;
+            try peers.append(allocator, cluster_binds.items[j]);
+        }
+
+        const node = try RunningServer.start(allocator, listen_addresses[i], .{
+            .bind_address = cluster_binds.items[i],
+            .peer_addresses = peers.items,
+            .heartbeat_interval_ms = 250,
+        });
+        try nodes.append(allocator, node);
+    }
+
+    const node_0 = nodes.items[0];
+    const node_last = nodes.items[cluster_size - 1];
+
+    var client_a = try client_mod.Client.connect(allocator, node_0.listenAddress(), null);
+    defer client_a.deinit();
+    var client_b = try client_mod.Client.connect(allocator, node_last.listenAddress(), null);
+    defer client_b.deinit();
+    try client_a.subscribe("cluster.demo", null, 1);
+    try waitForOkWithin(&client_a, 1000);
+
+    var propagated = false;
+    for (0..20) |_| {
+        var cluster_ready = true;
+        for (1..cluster_size) |i| {
+            if (nodes.items[i].server.cluster.?.debugRemoteSubscriptionCount() == 0) {
+                cluster_ready = false;
+                break;
+            }
+        }
+        if (cluster_ready) {
+            propagated = true;
+            break;
+        }
+        std.Thread.sleep(50 * std.time.ns_per_ms);
+    }
+    try std.testing.expect(propagated);
+
+    const remote_payload = try std.fmt.allocPrint(allocator, "remote", .{});
+    defer allocator.free(remote_payload);
+    const remote_delivery_before = clusterDeliveryCountTotal(nodes.items);
+    try client_b.publish("cluster.demo", null, remote_payload);
+    try waitForClusterDeliveryCount(nodes.items, remote_delivery_before + 1, 5000);
+    const remote_msg = try waitForMessageWithin(&client_a, 1000) orelse return error.ExpectedRemoteDelivery;
+    try std.testing.expectEqualStrings(remote_payload, remote_msg.payload);
+
+    const local_payload = try std.fmt.allocPrint(allocator, "local", .{});
+    defer allocator.free(local_payload);
+    try client_a.publish("cluster.demo", null, local_payload);
+
+    const local_msg = try waitForMessageWithin(&client_a, 1000) orelse return error.ExpectedLocalDelivery;
+    try std.testing.expectEqualStrings(local_payload, local_msg.payload);
+
+    try client_a.unsubscribe(1, null);
+    try waitForOkWithin(&client_a, 1000);
+    for (0..20) |_| {
+        var cluster_empty = true;
+        for (1..cluster_size) |i| {
+            if (nodes.items[i].server.cluster.?.debugRemoteSubscriptionCount() != 0) {
+                cluster_empty = false;
+                break;
+            }
+        }
+        if (cluster_empty) break;
+        std.Thread.sleep(50 * std.time.ns_per_ms);
+    }
+
+    try std.testing.expectEqual(@as(?client_mod.Message, null), try waitForMessageWithin(&client_a, 250));
+
+    const payload_two = try std.fmt.allocPrint(allocator, "two", .{});
+    defer allocator.free(payload_two);
+    try client_b.publish("cluster.demo", null, payload_two);
+    try std.testing.expectEqual(@as(?client_mod.Message, null), try waitForMessageWithin(&client_a, 250));
+}
+
 test "auth store validates keys and permissions" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -134,6 +374,250 @@ fn makeSocketPair() ![2]std.net.Stream {
         .{ .handle = @as(std.net.Stream.Handle, fds[1]) },
     };
 }
+
+const RunningServer = struct {
+    allocator: std.mem.Allocator,
+    broker: broker_mod.Broker,
+    server: *server_mod.Server,
+    thread: ?std.Thread = null,
+
+    fn start(allocator: std.mem.Allocator, listen_address: std.net.Address, cluster_cfg: config_mod.Cluster) !*RunningServer {
+        const running = try allocator.create(RunningServer);
+        errdefer allocator.destroy(running);
+
+        running.* = .{
+            .allocator = allocator,
+            .broker = broker_mod.Broker.init(allocator),
+            .server = undefined,
+        };
+        errdefer running.broker.deinit();
+
+        running.server = try server_mod.Server.start(allocator, &running.broker, listen_address, null, cluster_cfg, true);
+        errdefer {
+            running.server.deinit();
+            allocator.destroy(running.server);
+        }
+
+        running.thread = try std.Thread.spawn(.{}, runServerServe, .{running.server});
+        return running;
+    }
+
+    fn deinit(self: *RunningServer) void {
+        const thread = self.thread;
+        self.thread = null;
+        self.server.requestStop();
+        if (thread) |handle| handle.join();
+        self.server.deinit();
+        self.allocator.destroy(self.server);
+        self.broker.deinit();
+        self.allocator.destroy(self);
+    }
+
+    fn listenAddress(self: *RunningServer) std.net.Address {
+        return self.server.listenAddress();
+    }
+};
+
+fn runServerServe(server: *server_mod.Server) void {
+    _ = server.serve() catch {};
+}
+
+fn reserveUdpPort(ip: []const u8) !u16 {
+    const address = try std.net.Address.parseIp(ip, 0);
+    const fd = try posix.socket(
+        address.any.family,
+        posix.SOCK.DGRAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK,
+        posix.IPPROTO.UDP,
+    );
+    defer posix.close(fd);
+    try posix.bind(fd, &address.any, address.getOsSockLen());
+
+    var bound = address;
+    var len: posix.socklen_t = @sizeOf(posix.sockaddr);
+    try posix.getsockname(fd, &bound.any, &len);
+    return bound.getPort();
+}
+
+fn waitForMessageWithin(client: *client_mod.Client, timeout_ms: u64) !?client_mod.Message {
+    const deadline = std.time.nanoTimestamp() + @as(i128, timeout_ms) * std.time.ns_per_ms;
+
+    while (std.time.nanoTimestamp() < deadline) {
+        if (try client.reader.next()) |frame| {
+            switch (frame) {
+                .msg => |msg| return msg,
+                .ok, .pong, .info => continue,
+                .close => return error.ServerClosed,
+                .err => return error.InvalidServerResponse,
+            }
+        }
+
+        const now = std.time.nanoTimestamp();
+        if (now >= deadline) break;
+        var fds = [_]std.posix.pollfd{
+            .{ .fd = client.stream.handle, .events = std.posix.POLL.IN, .revents = 0 },
+        };
+        const remaining_ms_i128 = @divTrunc(deadline - now, std.time.ns_per_ms);
+        const remaining_ms = @max(@as(i32, 1), @as(i32, @intCast(remaining_ms_i128)));
+        _ = try std.posix.poll(&fds, remaining_ms);
+        if ((fds[0].revents & std.posix.POLL.IN) != 0) {
+            const read_len = try client.stream.read(&client.scratch);
+            if (read_len == 0) return null;
+            try client.reader.feed(client.scratch[0..read_len]);
+        }
+    }
+
+    return null;
+}
+
+fn waitForOkWithin(client: *client_mod.Client, timeout_ms: u64) !void {
+    const deadline = std.time.nanoTimestamp() + @as(i128, timeout_ms) * std.time.ns_per_ms;
+
+    while (std.time.nanoTimestamp() < deadline) {
+        if (try client.reader.next()) |frame| {
+            switch (frame) {
+                .ok => return,
+                .pong, .info => continue,
+                .msg => continue,
+                .close => return error.ServerClosed,
+                .err => return error.InvalidServerResponse,
+            }
+        }
+
+        const now = std.time.nanoTimestamp();
+        if (now >= deadline) break;
+        var fds = [_]std.posix.pollfd{
+            .{ .fd = client.stream.handle, .events = std.posix.POLL.IN, .revents = 0 },
+        };
+        const remaining_ms_i128 = @divTrunc(deadline - now, std.time.ns_per_ms);
+        const remaining_ms = @max(@as(i32, 1), @as(i32, @intCast(remaining_ms_i128)));
+        _ = try std.posix.poll(&fds, remaining_ms);
+        if ((fds[0].revents & std.posix.POLL.IN) != 0) {
+            const read_len = try client.stream.read(&client.scratch);
+            if (read_len == 0) return error.ServerClosed;
+            try client.reader.feed(client.scratch[0..read_len]);
+        }
+    }
+
+    return error.Timeout;
+}
+
+fn clusterDeliveryCountTotal(nodes: []const *RunningServer) u64 {
+    var total: u64 = 0;
+    for (nodes) |node| {
+        total += node.server.clusterDeliveryCount();
+    }
+    return total;
+}
+
+fn waitForClusterDeliveryCount(nodes: []const *RunningServer, expected: u64, timeout_ms: u64) !void {
+    const deadline = std.time.nanoTimestamp() + @as(i128, timeout_ms) * std.time.ns_per_ms;
+    while (std.time.nanoTimestamp() < deadline) {
+        if (clusterDeliveryCountTotal(nodes) >= expected) return;
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+    }
+    return error.Timeout;
+}
+
+const UdpPeer = struct {
+    fd: posix.socket_t,
+    address: std.net.Address,
+    remote_address: std.net.Address,
+
+    fn bind(ip: []const u8, port: u16, remote_address: std.net.Address) !UdpPeer {
+        const address = try std.net.Address.parseIp(ip, port);
+        return try bindAddress(address, remote_address);
+    }
+
+    fn bindAddress(address: std.net.Address, remote_address: std.net.Address) !UdpPeer {
+        const fd = try posix.socket(
+            address.any.family,
+            posix.SOCK.DGRAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK,
+            posix.IPPROTO.UDP,
+        );
+        errdefer posix.close(fd);
+        try posix.bind(fd, &address.any, address.getOsSockLen());
+
+        var bound = address;
+        var len: posix.socklen_t = @sizeOf(posix.sockaddr);
+        try posix.getsockname(fd, &bound.any, &len);
+        return .{ .fd = fd, .address = bound, .remote_address = remote_address };
+    }
+
+    fn deinit(self: *UdpPeer) void {
+        posix.close(self.fd);
+    }
+
+    fn sendPacket(self: *UdpPeer, allocator: std.mem.Allocator, packet: protocol.ClusterPacket) !void {
+        const json = try protocol.formatClusterPacketJson(allocator, packet);
+        defer allocator.free(json);
+        _ = try posix.sendto(self.fd, json, 0, &self.remote_address.any, self.remote_address.getOsSockLen());
+    }
+
+    fn waitForPacket(self: *UdpPeer, allocator: std.mem.Allocator, kind: []const u8, timeout_ms: u64) !?ObservedPacket {
+        const deadline = std.time.nanoTimestamp() + @as(i128, timeout_ms) * std.time.ns_per_ms;
+        var scratch: [65535]u8 = undefined;
+
+        while (std.time.nanoTimestamp() < deadline) {
+            var src_addr: std.net.Address = undefined;
+            var src_len: posix.socklen_t = @sizeOf(posix.sockaddr);
+            const len = posix.recvfrom(self.fd, scratch[0..], 0, &src_addr.any, &src_len) catch |err| switch (err) {
+                error.WouldBlock => {
+                    std.Thread.sleep(10 * std.time.ns_per_ms);
+                    continue;
+                },
+                else => return err,
+            };
+            if (len == 0) continue;
+
+            const parsed = try std.json.parseFromSlice(protocol.ClusterPacket, allocator, scratch[0..len], .{
+                .allocate = .alloc_always,
+                .ignore_unknown_fields = true,
+            });
+            defer parsed.deinit();
+            if (std.mem.eql(u8, parsed.value.kind, kind)) {
+                const observed = ObservedPacket{
+                    .kind = try allocator.dupe(u8, parsed.value.kind),
+                    .origin_id = parsed.value.origin_id,
+                    .seq = parsed.value.seq,
+                    .publish_subject = if (parsed.value.publish) |publish| try allocator.dupe(u8, publish.subject) else null,
+                    .publish_payload_b64 = if (parsed.value.publish) |publish| try allocator.dupe(u8, publish.payload_b64) else null,
+                    .ack_origin_id = parsed.value.ack_origin_id,
+                    .ack_seq = parsed.value.ack_seq,
+                };
+                return observed;
+            }
+        }
+
+        return null;
+    }
+
+    fn payloadText(self: *UdpPeer, allocator: std.mem.Allocator, payload_b64: []const u8) ![]u8 {
+        _ = self;
+        const out_len = std.base64.standard.Decoder.calcSizeForSlice(payload_b64) catch |err| switch (err) {
+            error.InvalidCharacter, error.InvalidPadding => return error.InvalidBase64,
+            else => return err,
+        };
+        const out = try allocator.alloc(u8, out_len);
+        try std.base64.standard.Decoder.decode(out, payload_b64);
+        return out;
+    }
+};
+
+const ObservedPacket = struct {
+    kind: []u8,
+    origin_id: u64,
+    seq: u64,
+    publish_subject: ?[]u8 = null,
+    publish_payload_b64: ?[]u8 = null,
+    ack_origin_id: ?u64 = null,
+    ack_seq: ?u64 = null,
+
+    fn deinit(self: *ObservedPacket, allocator: std.mem.Allocator) void {
+        allocator.free(self.kind);
+        if (self.publish_subject) |subject| allocator.free(subject);
+        if (self.publish_payload_b64) |payload| allocator.free(payload);
+    }
+};
 
 fn readProtocolCommand(reader: *protocol.Reader, stream: std.net.Stream, scratch: []u8) !?protocol.Command {
     while (true) {

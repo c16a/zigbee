@@ -6,6 +6,10 @@ pub fn build(b: *std.Build) void {
     // Default to a release-safe build so `zig build` produces optimized binaries
     // without needing `-Doptimize=...` on the command line.
     const optimize = .ReleaseSafe;
+    const xev = b.dependency("libxev", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const common_client = b.createModule(.{
         .root_source_file = b.path("src/common/client.zig"),
@@ -13,8 +17,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const cli_modules = makeCliModules(b, target, optimize, common_client);
-    const server_exe = makeExecutable(b, "zigbee", "src/server/main.zig", target, optimize);
+    const server_exe = makeExecutable(b, "zigbee", "src/server/main.zig", target, optimize, true);
     server_exe.root_module.addImport("common_client", common_client);
+    server_exe.root_module.addImport("xev", xev.module("xev"));
     const cli_main_module = b.createModule(.{
         .root_source_file = b.path("src/cli/main.zig"),
         .target = target,
@@ -56,6 +61,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     tests.root_module.addImport("common_client", common_client);
+    tests.root_module.addImport("xev", xev.module("xev"));
     server_exe.root_module.addImport("common_client", common_client);
     cli_main_module.addImport("common_client", common_client);
 
@@ -116,27 +122,16 @@ pub fn build(b: *std.Build) void {
         .target_triple = "aarch64-macos-none",
         .output_dir = "macos-arm64",
     });
-    addCrossTarget(b, cross_step, optimize, .{
-        .step_name = "windows-amd64",
-        .description = "Build Windows AMD64",
-        .target_triple = "x86_64-windows-gnu",
-        .output_dir = "windows-amd64",
-    });
-    addCrossTarget(b, cross_step, optimize, .{
-        .step_name = "windows-arm64",
-        .description = "Build Windows ARM64",
-        .target_triple = "aarch64-windows-gnu",
-        .output_dir = "windows-arm64",
-    });
 }
 
-fn makeExecutable(b: *std.Build, name: []const u8, root_source: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+fn makeExecutable(b: *std.Build, name: []const u8, root_source: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, link_libc: bool) *std.Build.Step.Compile {
     return b.addExecutable(.{
         .name = name,
         .root_module = b.createModule(.{
             .root_source_file = b.path(root_source),
             .target = target,
             .optimize = optimize,
+            .link_libc = link_libc,
         }),
     });
 }
@@ -208,13 +203,20 @@ fn addCrossTarget(b: *std.Build, cross_step: *std.Build.Step, optimize: std.buil
         .target = resolved_target,
         .optimize = optimize,
     });
-    const server_exe = makeExecutable(b, "zigbee", "src/server/main.zig", resolved_target, optimize);
+    const xev = b.dependency("libxev", .{
+        .target = resolved_target,
+        .optimize = optimize,
+    });
+    const needs_libc = true;
+    const server_exe = makeExecutable(b, "zigbee", "src/server/main.zig", resolved_target, optimize, needs_libc);
     server_exe.root_module.addImport("common_client", common_client);
+    server_exe.root_module.addImport("xev", xev.module("xev"));
     const cli_modules = makeCliModules(b, resolved_target, optimize, common_client);
     const cli_main_module = b.createModule(.{
         .root_source_file = b.path("src/cli/main.zig"),
         .target = resolved_target,
         .optimize = optimize,
+        .link_libc = needs_libc,
     });
     cli_main_module.addImport("cli_app", cli_modules.app);
     const cli_exe = b.addExecutable(.{
